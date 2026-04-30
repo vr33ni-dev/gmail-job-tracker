@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vr33ni-dev/gmail-job-tracker/internal/claude"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/gmail"
+	llm "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
 )
 
 var statusPriority = map[domain.Status]int{
@@ -28,13 +28,13 @@ func shouldUpdateStatus(current, next domain.Status) bool {
 }
 
 type Service struct {
-	store  *db.Store
-	gmail  *gmail.Client
-	claude *claude.Client
+	store *db.Store
+	gmail *gmail.Client
+	llm   *llm.Client
 }
 
-func NewService(store *db.Store, g *gmail.Client, c *claude.Client) *Service {
-	return &Service{store: store, gmail: g, claude: c}
+func NewService(store *db.Store, g *gmail.Client, c *llm.Client) *Service {
+	return &Service{store: store, gmail: g, llm: c}
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -70,9 +70,10 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		return err
 	}
 
-	parsed, err := s.claude.ParseJobEmail(ctx, email.Subject, email.Body, email.From)
+	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, email.Body, email.From)
 	if err != nil {
-		return err
+		log.Printf("skipping email %s: %v", email.ID, err)
+		return s.store.MarkEmailProcessed(ctx, email.ID) // mark as processed so it doesn't retry forever
 	}
 
 	log.Printf("parsed email %s: company=%s role=%s status=%s confidence=%s",

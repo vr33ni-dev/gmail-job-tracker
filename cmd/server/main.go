@@ -13,7 +13,8 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/api"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
-	claudeclient "github.com/vr33ni-dev/gmail-job-tracker/internal/claude"
+	llmclient "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
+
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/gmail"
 	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
@@ -34,8 +35,8 @@ func main() {
 		log.Fatalf("migrations: %v", err)
 	}
 
-	// Claude
-	claude := claudeclient.NewClient()
+	// LLM
+	llm := llmclient.NewClient()
 
 	// Router
 	r := chi.NewRouter()
@@ -63,7 +64,7 @@ func main() {
 		if err != nil {
 			log.Printf("gmail init failed: %v", err)
 		} else {
-			svc = syncsvc.NewService(store, gmailClient, claude)
+			svc = syncsvc.NewService(store, gmailClient, llm)
 			go svc.RunLoop(ctx, 15*time.Minute)
 			log.Println("gmail sync running every 15 minutes")
 		}
