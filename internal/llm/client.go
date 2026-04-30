@@ -79,7 +79,6 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string) 
 }
 
 // ── Claude ───────────────────────────────────────────────────────────────────
-
 func (c *Client) parseWithClaude(ctx context.Context, subject, body, from string) (*domain.ParsedEmail, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 
@@ -221,13 +220,11 @@ func cleanJSON(s string) string {
 	s = strings.TrimSuffix(s, "```")
 	s = strings.TrimSpace(s)
 
-	// find the first { and last } to extract just the JSON object
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
 	if start != -1 && end != -1 && end > start {
 		s = s[start : end+1]
 	}
-
 	return s
 }
 
