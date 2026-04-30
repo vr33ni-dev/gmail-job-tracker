@@ -67,7 +67,15 @@ Platform detection rules:
 - "lever" if sender contains lever.co
 - "softgarden" if sender contains softgarden.io
 - "direct" for company domain emails
-- "other" if unclear`
+- "other" if unclear
+
+IMPORTANT: 
+- "role" must be the job title the candidate applied for, NOT the interviewer's title or name
+- If the role cannot be determined from the email, use "" (empty string)
+- Never use interviewer names, team lead titles, or internal contact names as the role
+
+- If the email is a reminder or follow-up (contains words like "reminder", "just one step away", "friendly reminder", "don't forget"), and the role cannot be clearly identified, return confidence "low" so it gets skipped
+- If the email is clearly a newsletter, marketing email, or promotional content (contains "unsubscribe", "Newsletter", "Angebot", "Vorrat", no job-related content), return confidence "low"`
 
 func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string) (*domain.ParsedEmail, error) {
 	switch c.provider {

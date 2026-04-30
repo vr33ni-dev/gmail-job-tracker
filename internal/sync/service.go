@@ -90,6 +90,15 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	}
 
 	if app == nil {
+		if isReminder(email.Body) {
+			log.Printf("skipping reminder email for %s", parsed.Company)
+			return s.store.MarkEmailProcessed(ctx, email.ID)
+		}
+		if isSentByUser(email.From) {
+			log.Printf("skipping sent email from self")
+			return s.store.MarkEmailProcessed(ctx, email.ID)
+		}
+
 		appliedAt := email.Date
 		if appliedAt.IsZero() {
 			log.Printf("warning: could not parse date for email %s", email.ID)
@@ -108,6 +117,10 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		if err := s.store.UpsertApplication(ctx, app); err != nil {
 			return err
 		}
+	} else if isReminder(email.Body) {
+		log.Printf("skipping reminder email for existing application %s/%s", parsed.Company, parsed.Role)
+		return s.store.MarkEmailProcessed(ctx, email.ID)
+
 	} else if shouldUpdateStatus(app.Status, parsed.Status) {
 		event := &domain.StatusEvent{
 			ApplicationID: app.ID,
@@ -123,10 +136,27 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 			return err
 		}
 	}
-
 	return s.store.MarkEmailProcessed(ctx, email.ID)
 }
 
+func isReminder(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "reminder") ||
+		strings.Contains(lower, "just one step away") ||
+		strings.Contains(lower, "friendly reminder") ||
+		strings.Contains(lower, "last reminder") ||
+		strings.Contains(lower, "don't forget") ||
+		strings.Contains(lower, "still interested") ||
+		strings.Contains(lower, "follow-up on your application") ||
+		strings.Contains(lower, "match score") ||
+		strings.Contains(lower, "assessment report") ||
+		strings.Contains(lower, "thanks again for applying")
+}
+
+func isSentByUser(from string) bool {
+	from = strings.ToLower(from)
+	return strings.Contains(from, "lechner") || strings.Contains(from, "v.m.s.lechner")
+}
 func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

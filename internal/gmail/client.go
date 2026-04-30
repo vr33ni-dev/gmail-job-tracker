@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +23,15 @@ type Email struct {
 }
 
 type Client struct{ svc *gmail.Service }
+
+var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
+var whitespaceRegex = regexp.MustCompile(`\s+`)
+
+func stripHTML(s string) string {
+	s = htmlTagRegex.ReplaceAllString(s, " ")
+	s = whitespaceRegex.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
 
 func NewClient(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*Client, error) {
 	svc, err := gmail.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
@@ -76,7 +86,7 @@ func (c *Client) fetchMessage(ctx context.Context, id string) (*Email, error) {
 			email.Date = parseEmailDate(h.Value)
 		}
 	}
-	email.Body = extractBody(msg.Payload)
+	email.Body = stripHTML(extractBody(msg.Payload))
 	return email, nil
 }
 
