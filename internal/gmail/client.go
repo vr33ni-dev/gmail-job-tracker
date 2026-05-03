@@ -70,6 +70,42 @@ func (c *Client) FetchJobEmails(ctx context.Context, since time.Time) ([]Email, 
 	return emails, nil
 }
 
+func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, since time.Time) ([]Email, error) {
+	query := fmt.Sprintf(
+		`after:%s "%s" (subject:"application" OR subject:"applied" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung")`,
+		since.Format("2006/01/02"),
+		company,
+	)
+
+	var emails []Email
+	pageToken := ""
+
+	for {
+		call := c.svc.Users.Messages.List("me").Q(query).MaxResults(20)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		res, err := call.Context(ctx).Do()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, m := range res.Messages {
+			if email, err := c.fetchMessage(ctx, m.Id); err == nil {
+				emails = append(emails, *email)
+			}
+		}
+
+		if res.NextPageToken == "" {
+			break
+		}
+		pageToken = res.NextPageToken
+	}
+
+	return emails, nil
+}
+
 func (c *Client) fetchMessage(ctx context.Context, id string) (*Email, error) {
 	msg, err := c.svc.Users.Messages.Get("me", id).Format("full").Context(ctx).Do()
 	if err != nil {
@@ -94,16 +130,28 @@ func extractBody(part *gmail.MessagePart) string {
 	if part == nil {
 		return ""
 	}
-	if part.MimeType == "text/plain" && part.Body != nil {
+
+	// prefer plain text
+	if part.MimeType == "text/plain" && part.Body != nil && part.Body.Data != "" {
 		if data, err := base64.URLEncoding.DecodeString(part.Body.Data); err == nil {
 			return strings.TrimSpace(string(data))
 		}
 	}
+
+	// recurse into multipart
 	for _, p := range part.Parts {
 		if body := extractBody(p); body != "" {
 			return body
 		}
 	}
+
+	// fall back to HTML and strip tags
+	if part.MimeType == "text/html" && part.Body != nil && part.Body.Data != "" {
+		if data, err := base64.URLEncoding.DecodeString(part.Body.Data); err == nil {
+			return stripHTML(strings.TrimSpace(string(data)))
+		}
+	}
+
 	return ""
 }
 

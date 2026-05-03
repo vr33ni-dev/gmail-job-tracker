@@ -36,7 +36,7 @@ func main() {
 	}
 
 	// LLM
-	llm := llmclient.NewClient()
+	llm := llmclient.NewClient(store)
 
 	// Router
 	r := chi.NewRouter()

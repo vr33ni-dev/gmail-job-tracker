@@ -6,14 +6,11 @@ type Status string
 
 const (
 	StatusApplied     Status = "applied"
-	StatusScreening   Status = "screening"
 	StatusInterview   Status = "interview"
 	StatusAIInterview Status = "ai_interview"
 	StatusOffer       Status = "offer"
 	StatusRejected    Status = "rejected"
 	StatusWithdrawn   Status = "withdrawn"
-	StatusNoResponse  Status = "no_response"
-	StatusReviewing   Status = "reviewing"
 )
 
 type Application struct {
@@ -32,6 +29,24 @@ type Application struct {
 	Language    string    `json:"language"`
 }
 
+type ApplicationStage struct {
+	ID          int64     `json:"id"`
+	Status      Status    `json:"status"`
+	AppliedAt   time.Time `json:"applied_at"`
+	EmailBody   string    `json:"email_body"`
+	LastEmailID string    `json:"last_email_id"`
+}
+
+type GroupedApplication struct {
+	Company       string             `json:"company"`
+	Role          string             `json:"role"`
+	Platform      string             `json:"platform"`
+	Language      string             `json:"language"`
+	URL           string             `json:"url"`
+	CurrentStatus Status             `json:"current_status"`
+	AppliedAt     time.Time          `json:"applied_at"`
+	Stages        []ApplicationStage `json:"stages"`
+}
 type StatusEvent struct {
 	ID            int64     `json:"id"`
 	ApplicationID int64     `json:"application_id"`
@@ -50,4 +65,11 @@ type ParsedEmail struct {
 	Summary    string `json:"summary"`
 	Language   string `json:"language"`
 	Platform   string `json:"platform"`
+}
+
+type Correction struct {
+	EmailSubject  string `json:"email_subject"`
+	EmailBody     string `json:"email_body"`
+	WrongStatus   Status `json:"wrong_status"`
+	CorrectStatus Status `json:"correct_status"`
 }

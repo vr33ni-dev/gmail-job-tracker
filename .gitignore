@@ -1,2 +1,4 @@
 .env
 token.json
+seeds.sql
+docs/*

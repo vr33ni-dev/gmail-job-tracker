@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -29,19 +30,38 @@ func (h *Handler) Router() http.Handler {
 
 	r.Get("/api/applications", h.listApplications)
 	r.Post("/api/applications", h.createApplication)
+	r.Get("/api/applications/{id}/events", h.listEvents)
 	r.Post("/api/sync", h.triggerSync)
+	r.Post("/api/applications/{id}/correct", h.correctApplication)
 
 	return r
 }
 
+func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	events, err := h.store.ListStatusEvents(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if events == nil {
+		events = []domain.StatusEvent{}
+	}
+	writeJSON(w, events)
+}
+
 func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request) {
-	apps, err := h.store.ListApplications(r.Context())
+	apps, err := h.store.ListGroupedApplications(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if apps == nil {
-		apps = []domain.Application{}
+		apps = []domain.GroupedApplication{}
 	}
 	writeJSON(w, apps)
 }
@@ -89,4 +109,41 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	app, err := h.store.GetApplication(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	newStatus := domain.Status(body.Status)
+	if err := h.store.AddCorrection(r.Context(),
+		app.LastEmailID, "", app.EmailBody,
+		app.Status, newStatus); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.store.UpdateStatus(r.Context(), id, newStatus, app.LastEmailID, app.EmailBody); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "updated"})
 }
