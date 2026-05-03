@@ -73,6 +73,59 @@ go run cmd/server/main.go
 
 On first run, you'll be prompted to authorize access — this generates a `token.json` file (never commit this).
 
+## Configuration
+
+### User Settings
+
+The `settings` table stores personal configuration. Update after setup:
+
+```bash
+make db-set-user
+```
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `user_email` | Your Gmail address — used to detect sent emails | `you@gmail.com` |
+| `user_name` | Your last name — used to filter out emails you sent | `smith` |
+| `last_poll_time` | Controls how far back Gmail is polled on first sync | `2026-01-01` |
+
+### Company Aliases
+
+Some companies send emails from different names or ATS platforms. Add aliases to ensure they group correctly:
+
+```bash
+make db-add-alias
+# enter: Emma Sleep GmbH
+# enter: Emma - The Sleep Company
+```
+
+Or directly:
+
+```sql
+INSERT INTO company_aliases VALUES ('Emma Sleep GmbH', 'Emma - The Sleep Company');
+```
+
+Common cases:
+
+- ATS platforms sending as the company (`lever.co`, `greenhouse.io`)
+- Company name variations (`epilot GmbH` vs `epilot`)
+- Lowercase variants (`acto` vs `Acto`)
+
+Personal aliases go in `seeds.sql` (git-ignored) so they survive resets:
+
+```bash
+make db-seed
+```
+
+### Personal Seed File
+
+`seeds.sql` is git-ignored and contains your personal configuration:
+
+- User email and name (emails sent from this address are filtered out during sync. Without this, your own replies (questions to recruiters, withdrawal emails) would be processed as incoming job emails and potentially misclassified)
+- Company aliases specific to your applications
+
+After every `make db-reset`, run `make db-seed` to restore your config. Or use `make db-fresh` which does both.
+
 ## TODO
 
 ### Multi-step reasoning (optional)
