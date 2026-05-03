@@ -13,15 +13,47 @@ Automatically syncs your Gmail inbox and uses Claude AI to detect and track job 
 
 - **Go** with [chi](https://github.com/go-chi/chi) router
 - **PostgreSQL** with [goose](https://github.com/pressly/goose) migrations
+- **React + TypeScript** frontend
 - **Gmail API** for email access
-- **Claude API** (Anthropic) for email classification
+- **LLM classification** — supports Claude (Anthropic), Ollama (local, default)
+- **Docker** for local PostgreSQL
 
 ## Prerequisites
 
-- Go 1.21+
-- PostgreSQL
+- Go 1.22+
+- Docker (for PostgreSQL)
 - A Google Cloud project with the Gmail API enabled
-- An Anthropic API key
+- One of:
+  - [Ollama](https://ollama.com) (free, local) — recommended
+  - An Anthropic API key (Claude)
+
+## LLM Setup
+
+By default the tracker uses Ollama for local, free, private classification.
+
+### Ollama
+
+```bash
+brew install ollama
+ollama serve
+ollama pull llama3.1:8b
+```
+
+Set in `.env`:
+
+```bash
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.1:8b
+```
+
+### Claude (Anthropic)
+
+Better accuracy, costs ~$0.01 per full sync. Recommended for initial bulk sync.
+
+```bash
+LLM_PROVIDER=claude
+ANTHROPIC_API_KEY=your_key_here
+```
 
 ## Setup
 
