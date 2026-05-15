@@ -19,13 +19,16 @@ func Config() *oauth2.Config {
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  "http://localhost:8080/auth/callback",
-		Scopes:       []string{gmail.GmailReadonlyScope},
+		Scopes:       []string{gmail.GmailReadonlyScope, gmail.GmailModifyScope},
 		Endpoint:     google.Endpoint,
 	}
 }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	url := Config().AuthCodeURL("state", oauth2.AccessTypeOffline)
+	url := Config().AuthCodeURL("state",
+		oauth2.AccessTypeOffline,
+		oauth2.ApprovalForce,
+	)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
@@ -48,7 +51,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, `<html><body style="font-family:sans-serif;padding:40px;background:#080a10;color:#e2e8f0">
+	_, _ = fmt.Fprint(w, `<html><body style="font-family:sans-serif;padding:40px;background:#080a10;color:#e2e8f0">
 		<h2>✅ Gmail connected!</h2>
 		<p>You can close this tab and go back to JobTracker.</p>
 	</body></html>`)

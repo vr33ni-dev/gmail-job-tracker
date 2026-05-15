@@ -14,6 +14,7 @@ CREATE TABLE applications (
     language      TEXT NOT NULL DEFAULT 'en',
     notes         TEXT NOT NULL DEFAULT '',
     url           TEXT NOT NULL DEFAULT '',
+    needs_review  BOOLEAN NOT NULL DEFAULT false,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

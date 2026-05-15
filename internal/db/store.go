@@ -48,7 +48,7 @@ func (s *Store) ListStatusEvents(ctx context.Context, applicationID int64) ([]do
 
 func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, created_at, updated_at
+		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
 		FROM applications ORDER BY applied_at DESC`)
 	if err != nil {
 		return nil, err
@@ -59,7 +59,8 @@ func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, err
 		var a domain.Application
 		var lastEmailID, emailBody, language, notes, url sql.NullString
 		if err := rows.Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-			&a.Status, &lastEmailID, &emailBody, &language, &notes, &url, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
+			&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.LastEmailID = lastEmailID.String
@@ -74,13 +75,14 @@ func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, err
 
 func (s *Store) UpsertApplication(ctx context.Context, a *domain.Application) error {
 	return s.db.QueryRowContext(ctx, `
-		INSERT INTO applications (company, role, platform, applied_at, status, last_email_id, email_body, language, url)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO applications (company, role, platform, applied_at, status, last_email_id, email_body, language, url, needs_review)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (id) DO UPDATE
 		SET status=EXCLUDED.status, last_email_id=EXCLUDED.last_email_id,
-		    email_body=EXCLUDED.email_body, updated_at=NOW()
+		    email_body=EXCLUDED.email_body, needs_review=EXCLUDED.needs_review, updated_at=NOW()
 		RETURNING id, created_at, updated_at`,
-		a.Company, a.Role, a.Platform, a.AppliedAt, a.Status, a.LastEmailID, a.EmailBody, a.Language, a.URL,
+		a.Company, a.Role, a.Platform, a.AppliedAt, a.Status,
+		a.LastEmailID, a.EmailBody, a.Language, a.URL, a.NeedsReview,
 	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
 
@@ -95,7 +97,7 @@ func (s *Store) FindByCompanyAndRole(ctx context.Context, company, role string) 
 	var a domain.Application
 	var lastEmailID, emailBody, language, notes, url sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, created_at, updated_at
+		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
 		FROM applications
 		WHERE (
 			LOWER(company) = LOWER($1)
@@ -110,7 +112,8 @@ func (s *Store) FindByCompanyAndRole(ctx context.Context, company, role string) 
 		ORDER BY applied_at DESC
 		LIMIT 1`, company, role,
 	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url, &a.CreatedAt, &a.UpdatedAt)
+		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
+		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -140,7 +143,7 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, company, role, platform, language, url, status, applied_at, email_body, last_email_id
+		SELECT id, company, role, platform, language, url, status, applied_at, email_body, last_email_id, needs_review
 		FROM applications
 		ORDER BY company, role, applied_at ASC`)
 	if err != nil {
@@ -159,6 +162,7 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 		appliedAt   time.Time
 		emailBody   string
 		lastEmailID string
+		needsReview bool
 	}
 
 	groupMap := make(map[string]*domain.GroupedApplication)
@@ -168,7 +172,7 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 		var r raw
 		var emailBody, lastEmailID, language, url sql.NullString
 		if err := rows.Scan(&r.id, &r.company, &r.role, &r.platform,
-			&language, &url, &r.status, &r.appliedAt, &emailBody, &lastEmailID); err != nil {
+			&language, &url, &r.status, &r.appliedAt, &emailBody, &lastEmailID, &r.needsReview); err != nil {
 			return nil, err
 		}
 		r.emailBody = emailBody.String
@@ -201,6 +205,7 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 			AppliedAt:   r.appliedAt,
 			EmailBody:   r.emailBody,
 			LastEmailID: r.lastEmailID,
+			NeedsReview: r.needsReview,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -241,7 +246,7 @@ func (s *Store) FindByCompanyRoleAndStatus(ctx context.Context, company, role st
 	var a domain.Application
 	var lastEmailID, emailBody, language, notes, url sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, created_at, updated_at
+		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
 		FROM applications
 		WHERE (
 			LOWER(company) = LOWER($1)
@@ -257,7 +262,8 @@ func (s *Store) FindByCompanyRoleAndStatus(ctx context.Context, company, role st
 		ORDER BY applied_at DESC
 		LIMIT 1`, company, role, status,
 	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url, &a.CreatedAt, &a.UpdatedAt)
+		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
+		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -334,10 +340,11 @@ func (s *Store) GetApplication(ctx context.Context, id int64) (*domain.Applicati
 	var a domain.Application
 	var lastEmailID, emailBody, language, notes, url sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, created_at, updated_at
+		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
 		FROM applications WHERE id=$1`, id,
 	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url, &a.CreatedAt, &a.UpdatedAt)
+		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
+		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -361,12 +368,13 @@ func (s *Store) FindMostRecentByCompany(ctx context.Context, company string) (*d
 	var a domain.Application
 	var lastEmailID, emailBody, language, notes, url sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, created_at, updated_at
+		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
 		FROM applications
 		WHERE LOWER(company) = LOWER($1) AND role != ''
 		ORDER BY applied_at DESC LIMIT 1`, company,
 	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url, &a.CreatedAt, &a.UpdatedAt)
+		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
+		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -407,8 +415,8 @@ func (s *Store) HasAppliedStage(ctx context.Context, company, role string) (bool
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS(
-			SELECT 1 FROM applications 
-			WHERE LOWER(company)=LOWER($1) 
+			SELECT 1 FROM applications
+			WHERE LOWER(company)=LOWER($1)
 			AND (LOWER(role)=LOWER($2) OR $2='')
 			AND status='applied'
 		)`, company, role,
@@ -418,17 +426,48 @@ func (s *Store) HasAppliedStage(ctx context.Context, company, role string) (bool
 
 func (s *Store) FixEmptyRoles(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
-        UPDATE applications a SET role = (
-            SELECT role FROM applications b 
-            WHERE LOWER(b.company) = LOWER(a.company) 
-            AND b.role != '' 
-            ORDER BY b.applied_at DESC LIMIT 1
-        ) 
-        WHERE a.role = '' 
-        AND EXISTS (
-            SELECT 1 FROM applications b 
-            WHERE LOWER(b.company) = LOWER(a.company) 
-            AND b.role != ''
-        )`)
+		UPDATE applications a SET role = (
+			SELECT role FROM applications b
+			WHERE LOWER(b.company) = LOWER(a.company)
+			AND b.role != ''
+			ORDER BY b.applied_at DESC LIMIT 1
+		)
+		WHERE a.role = ''
+		AND EXISTS (
+			SELECT 1 FROM applications b
+			WHERE LOWER(b.company) = LOWER(a.company)
+			AND b.role != ''
+		)`)
 	return err
+}
+
+func (s *Store) MarkReviewed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE applications SET needs_review=false WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) GetEmailIDsForInterviewApplications(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT last_email_id
+		FROM applications
+		WHERE last_email_id != ''
+		AND (LOWER(company), LOWER(role)) IN (
+			SELECT LOWER(company), LOWER(role)
+			FROM applications
+			WHERE status IN ('interview', 'ai_interview')
+		)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

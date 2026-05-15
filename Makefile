@@ -65,3 +65,12 @@ db-fresh:
 	@echo "1. make db-reset"
 	@echo "2. go run cmd/server/main.go (wait for migration, then Ctrl+C)"
 	@echo "3. make db-seed"
+
+lint:
+	golangci-lint run ./...
+
+test:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
+lint-test: lint test

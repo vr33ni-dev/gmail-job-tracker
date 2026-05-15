@@ -23,6 +23,7 @@ type Application struct {
 	LastEmailID string    `json:"last_email_id"`
 	Notes       string    `json:"notes"`
 	URL         string    `json:"url"`
+	NeedsReview bool      `json:"needs_review"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	EmailBody   string    `json:"email_body"`
@@ -35,6 +36,7 @@ type ApplicationStage struct {
 	AppliedAt   time.Time `json:"applied_at"`
 	EmailBody   string    `json:"email_body"`
 	LastEmailID string    `json:"last_email_id"`
+	NeedsReview bool      `json:"needs_review"`
 }
 
 type GroupedApplication struct {

@@ -31,7 +31,9 @@ func (s *Store) Migrate(dir string) error {
 
 		// Skip if already applied
 		var exists bool
-		s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename=$1)`, filename).Scan(&exists)
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename=$1)`, filename).Scan(&exists); err != nil {
+			return fmt.Errorf("check migration %s: %w", filename, err)
+		}
 		if exists {
 			continue
 		}
@@ -45,7 +47,9 @@ func (s *Store) Migrate(dir string) error {
 			return fmt.Errorf("apply %s: %w", filename, err)
 		}
 
-		s.db.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename)
+		if _, err := s.db.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename); err != nil {
+			return fmt.Errorf("record migration %s: %w", filename, err)
+		}
 		log.Printf("applied migration: %s", filename)
 	}
 

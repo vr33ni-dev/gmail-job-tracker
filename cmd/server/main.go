@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,7 +23,6 @@ import (
 
 func main() {
 	_ = godotenv.Load()
-
 	ctx := context.Background()
 
 	// DB
@@ -30,7 +30,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
-
 	if err := goose.Up(store.DB(), "migrations"); err != nil {
 		log.Fatalf("migrations: %v", err)
 	}
@@ -38,26 +37,39 @@ func main() {
 	// LLM
 	llm := llmclient.NewClient(store)
 
+	// declare svc before routes so callback can reference it
+	var svc *syncsvc.Service
+
 	// Router
 	r := chi.NewRouter()
 	r.Use(middleware.Logger, middleware.Recoverer)
 
 	// Auth routes
 	r.Get("/auth/login", auth.LoginHandler)
-	r.Get("/auth/callback", auth.CallbackHandler)
-
-	// Status endpoint — lets frontend know if Gmail is connected
-	r.Get("/auth/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if auth.IsConnected() {
-			w.Write([]byte(`{"connected":true}`))
-		} else {
-			w.Write([]byte(`{"connected":false}`))
+	r.Get("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		auth.CallbackHandler(w, r)
+		if svc == nil {
+			token, _ := auth.LoadToken()
+			gmailClient, err := gmail.NewClient(ctx, token, auth.Config())
+			if err == nil {
+				svc = syncsvc.NewService(store, gmailClient, llm)
+				go svc.RunLoop(ctx, 15*time.Minute)
+				log.Println("gmail sync initialized after auth")
+			}
 		}
 	})
 
-	// App API — wire sync if Gmail is already connected
-	var svc *syncsvc.Service
+	// Status endpoint
+	r.Get("/auth/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if auth.IsConnected() {
+			_, _ = w.Write([]byte(`{"connected":true}`))
+		} else {
+			_, _ = w.Write([]byte(`{"connected":false}`))
+		}
+	})
+
+	// Initialize sync if already connected
 	if auth.IsConnected() {
 		token, _ := auth.LoadToken()
 		gmailClient, err := gmail.NewClient(ctx, token, auth.Config())
@@ -69,10 +81,16 @@ func main() {
 			log.Println("gmail sync running every 15 minutes")
 		}
 	} else {
-		log.Println("gmail not connected — visit http://localhost:8080/auth/login")
+		log.Println("gmail not connected — opening browser to authenticate...")
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			if err := exec.Command("open", "http://localhost:8080/auth/login").Start(); err != nil {
+				log.Printf("open browser: %v", err)
+			}
+		}()
 	}
 
-	// Mount app API routes (sync endpoint needs svc)
+	// Mount app API routes
 	appHandler := api.NewHandler(store, svc)
 	r.Mount("/", appHandler.Router())
 
@@ -80,7 +98,6 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-
 	log.Printf("listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }

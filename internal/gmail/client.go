@@ -43,7 +43,7 @@ func NewClient(ctx context.Context, token *oauth2.Token, config *oauth2.Config) 
 
 func (c *Client) FetchJobEmails(ctx context.Context, since time.Time) ([]Email, error) {
 	query := fmt.Sprintf(
-		`after:%s (subject:"application" OR subject:"applied" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"next steps" OR subject:"thank you for applying" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung" OR subject:"leider" OR subject:"Vorstellungsgespräch" OR subject:"Deine Bewerbung" OR subject:"Ihre Bewerbung")`,
+		`after:%s (subject:"application" OR subject:"applied" OR subject:"process update" OR subject:"applying" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"meeting" OR subject:"next step" OR subject:"next steps" OR subject:"thank you for applying" OR subject:"thanks for applying" OR subject:"your application" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung" OR subject:"leider" OR subject:"Vorstellungsgespräch" OR subject:"Deine Bewerbung" OR subject:"Ihre Bewerbung" OR filename:invite.ics OR filename:invitation.ics OR "meet.google.com" OR "zoom.us" OR "calendly.com" OR "cal.com")`,
 		since.Format("2006/01/02"),
 	)
 	var emails []Email
@@ -72,7 +72,7 @@ func (c *Client) FetchJobEmails(ctx context.Context, since time.Time) ([]Email, 
 
 func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, since time.Time) ([]Email, error) {
 	query := fmt.Sprintf(
-		`after:%s "%s" (subject:"application" OR subject:"applied" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung")`,
+		`after:%s "%s" (subject:"application" OR subject:"applied" OR subject:"process update" OR subject:"applying" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"meeting" OR subject:"next step" OR subject:"next steps" OR subject:"thank you for applying" OR subject:"thanks for applying" OR subject:"your application" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung" OR filename:invite.ics OR filename:invitation.ics OR "meet.google.com" OR "zoom.us" OR "calendly.com" OR "cal.com")`,
 		since.Format("2006/01/02"),
 		company,
 	)
@@ -173,4 +173,54 @@ func parseEmailDate(dateStr string) time.Time {
 	}
 	log.Printf("unparseable date: %q", dateStr)
 	return time.Time{}
+}
+
+func (c *Client) MoveToLabel(ctx context.Context, messageID, labelName string) error {
+	// get or create label
+	labelID, err := c.getOrCreateLabel(ctx, labelName)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.svc.Users.Messages.Modify("me", messageID, &gmail.ModifyMessageRequest{
+		AddLabelIds: []string{labelID},
+	}).Context(ctx).Do()
+	return err
+}
+
+func (c *Client) getOrCreateLabel(ctx context.Context, name string) (string, error) {
+	labels, err := c.svc.Users.Labels.List("me").Context(ctx).Do()
+	if err != nil {
+		return "", err
+	}
+	for _, l := range labels.Labels {
+		log.Printf("gmail label: %q id=%s", l.Name, l.Id) // add this
+		if strings.EqualFold(l.Name, name) {
+			return l.Id, nil
+		}
+	}
+	// create if not exists
+	label, err := c.svc.Users.Labels.Create("me", &gmail.Label{
+		Name:                  name,
+		LabelListVisibility:   "labelShow",
+		MessageListVisibility: "show",
+	}).Context(ctx).Do()
+	if err != nil {
+		return "", err
+	}
+	return label.Id, nil
+}
+
+func (c *Client) BatchMoveToLabel(ctx context.Context, messageIDs []string, labelName string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	labelID, err := c.getOrCreateLabel(ctx, labelName)
+	if err != nil {
+		return err
+	}
+	return c.svc.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
+		Ids:         messageIDs,
+		AddLabelIds: []string{labelID},
+	}).Context(ctx).Do()
 }

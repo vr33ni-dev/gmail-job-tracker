@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -11,9 +12,6 @@ import (
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/gmail"
 	llm "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
 )
-
-// how long before we consider a new email with the same status a new stage
-const sameStatusWindowDays = 5
 
 type Service struct {
 	store     *db.Store
@@ -64,6 +62,19 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.SelfHeal(ctx); err != nil {
 		log.Printf("self-heal error: %v", err)
 	}
+
+	// move all emails belonging to interview applications to Jobs label
+	emailIDs, err := s.store.GetEmailIDsForInterviewApplications(ctx)
+	if err != nil {
+		log.Printf("label move: fetch email IDs: %v", err)
+	} else if len(emailIDs) > 0 {
+		if err := s.gmail.BatchMoveToLabel(ctx, emailIDs, "Jobs"); err != nil {
+			log.Printf("label move: batch modify: %v", err)
+		} else {
+			log.Printf("label move: moved %d emails to Jobs label", len(emailIDs))
+		}
+	}
+
 	return nil
 }
 
@@ -112,13 +123,14 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 		if err != nil || !found {
 			log.Printf("self-heal: no applied found for %s — creating placeholder", app.Company)
 			placeholder := &domain.Application{
-				Company:   app.Company,
-				Role:      app.Role,
-				Platform:  app.Platform,
-				AppliedAt: earliest.Add(-1 * time.Hour),
-				Status:    domain.StatusApplied,
-				EmailBody: "⚠️ Application confirmation email not found. This entry was automatically created by the self-healing sync.",
-				Language:  app.Language,
+				Company:     app.Company,
+				Role:        app.Role,
+				Platform:    app.Platform,
+				AppliedAt:   earliest.Add(-1 * time.Hour),
+				Status:      domain.StatusApplied,
+				EmailBody:   "⚠️ Application confirmation email not found. This entry was automatically created by the self-healing sync.",
+				Language:    app.Language,
+				NeedsReview: true,
 			}
 			if err := s.store.UpsertApplication(ctx, placeholder); err != nil {
 				log.Printf("self-heal: failed to create placeholder for %s: %v", app.Company, err)
@@ -139,24 +151,26 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 
 func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	// skip already processed
+	log.Printf("processing email %s: subject=%q from=%q", email.ID, email.Subject, email.From)
 	if processed, err := s.store.IsEmailProcessed(ctx, email.ID); err != nil || processed {
 		return err
 	}
 
 	// skip emails sent by the user
 	// handle sent emails — skip all
-	if isSentByUser(email.From) {
+	if s.isSentByUser(email.From) {
 		log.Printf("skipping sent email from self")
 		return s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	// skip reminders and noise before doing any DB work
 	if isReminder(email.Body) || isNoise(email.From) {
-		log.Printf("skipping noise/reminder email: %s", email.Subject)
+		log.Printf("skipping noise/reminder email: %s (reminder=%v noise=%v)",
+			email.Subject, isReminder(email.Body), isNoise(email.From))
 		return s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
-	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, email.Body, email.From)
+	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, stripHTML(email.Body), email.From)
 	if err != nil {
 		log.Printf("skipping email %s: %v", email.ID, err)
 		return s.store.MarkEmailProcessed(ctx, email.ID)
@@ -166,13 +180,21 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		email.ID, parsed.Company, parsed.Role, parsed.Status, parsed.Confidence)
 
 	if parsed.Confidence == "low" {
-		log.Printf("skipping low confidence email %s", email.ID)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
-	}
-
-	if parsed.Confidence == "low" {
-		log.Printf("skipping low confidence email %s", email.ID)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		if hasInterviewLink(email.Body) {
+			log.Printf("overriding low confidence — interview link detected in %s", email.ID)
+			parsed.Status = domain.StatusInterview
+			parsed.Confidence = "medium"
+			// extract company from sender domain as fallback
+			if parsed.Company == "" {
+				parsed.Company = extractDomainCompany(email.From)
+				if parsed.Company == "" {
+					parsed.Company = extractCompanyFromBody(email.Body)
+				}
+			}
+		} else {
+			log.Printf("skipping low confidence email %s", email.ID)
+			return s.store.MarkEmailProcessed(ctx, email.ID)
+		}
 	}
 
 	// if role is empty, try to inherit from existing entry for same company
@@ -198,40 +220,25 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		appliedAt = time.Now()
 	}
 
-	// find most recent row for this company+role with the same status
-	existing, err := s.store.FindByCompanyRoleAndStatus(ctx, parsed.Company, parsed.Role, parsed.Status)
-	if err != nil {
-		return err
-	}
-
-	if existing != nil {
-		daysSince := existing.AppliedAt.Sub(appliedAt).Hours() / 24
-		if daysSince >= 0 && daysSince < sameStatusWindowDays {
-			// existing row is newer — current email came first, this is a duplicate
-			log.Printf("skipping older duplicate status %s for %s", parsed.Status, parsed.Company)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
-		}
-		if daysSince < 0 && daysSince > -sameStatusWindowDays {
-			// current email is newer — it's a follow-up to existing, skip
-			log.Printf("skipping follow-up email for %s/%s", parsed.Company, parsed.Role)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
-		}
-	}
-
 	// create new row for this status stage
 	app := &domain.Application{
-		Company:     parsed.Company,
+		Company:     s.store.ResolveCompanyAlias(ctx, parsed.Company),
 		Role:        domain.NormalizeRole(parsed.Role),
 		Platform:    parsed.Platform,
 		AppliedAt:   appliedAt,
 		Status:      parsed.Status,
 		LastEmailID: email.ID,
-		EmailBody:   email.Body,
+		EmailBody:   stripHTML(email.Body),
 		Language:    parsed.Language,
 	}
 	if err := s.store.UpsertApplication(ctx, app); err != nil {
 		return err
 	}
+
+	// // move to Jobs label in Gmail
+	// if err := s.gmail.MoveToLabel(ctx, email.ID, "Jobs"); err != nil {
+	// 	log.Printf("warning: could not move email %s to Jobs label: %v", email.ID, err)
+	// }
 
 	return s.store.MarkEmailProcessed(ctx, email.ID)
 }
@@ -250,12 +257,24 @@ func isReminder(body string) bool {
 		strings.Contains(lower, "thanks again for applying") ||
 		strings.Contains(lower, "talent pool") ||
 		strings.Contains(lower, "i will have a new date") ||
-		strings.Contains(lower, "i'll have a new date")
+		strings.Contains(lower, "i'll have a new date") ||
+		strings.Contains(lower, "thanks for filling in this form") ||
+		strings.Contains(lower, "you're receiving this email because you filled in") ||
+		strings.Contains(lower, "thanks for filling in this form") ||
+		strings.Contains(lower, "you're receiving this email because you filled in") ||
+		strings.Contains(lower, "thank you for submitting your questionnaire") ||
+		strings.Contains(lower, "thanks for submitting your questionnaire")
 }
 
-func isSentByUser(from string) bool {
+func (s *Service) isSentByUser(from string) bool {
 	from = strings.ToLower(from)
-	return strings.Contains(from, "lechner") || strings.Contains(from, "v.m.s.lechner")
+	if s.userEmail != "" && strings.Contains(from, strings.ToLower(s.userEmail)) {
+		return true
+	}
+	if s.userName != "" && strings.Contains(from, strings.ToLower(s.userName)) {
+		return true
+	}
+	return false
 }
 
 func isNoise(from string) bool {
@@ -276,4 +295,94 @@ func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}
+}
+
+func stripHTML(body string) string {
+	// remove style/script blocks entirely
+	re := regexp.MustCompile(`(?is)<(style|script)[^>]*>.*?</(style|script)>`)
+	body = re.ReplaceAllString(body, "")
+	// remove links but keep their text: <a href="...">text</a> → text
+	re = regexp.MustCompile(`(?i)<a[^>]*href=[^>]*>(.*?)</a>`)
+	body = re.ReplaceAllString(body, "$1")
+	// remove bare URLs
+	re = regexp.MustCompile(`https?://\S+`)
+	body = re.ReplaceAllString(body, "")
+	// replace block elements with newlines
+	re = regexp.MustCompile(`(?i)<(br|p|div|tr|li)[^>]*>`)
+	body = re.ReplaceAllString(body, "\n")
+	// remove all remaining tags
+	re = regexp.MustCompile(`<[^>]+>`)
+	body = re.ReplaceAllString(body, "")
+	// decode common HTML entities
+	body = strings.ReplaceAll(body, "&amp;", "&")
+	body = strings.ReplaceAll(body, "&lt;", "<")
+	body = strings.ReplaceAll(body, "&gt;", ">")
+	body = strings.ReplaceAll(body, "&nbsp;", " ")
+	body = strings.ReplaceAll(body, "&#8203;", "")
+	body = strings.ReplaceAll(body, "&quot;", "\"")
+	// collapse multiple blank lines
+	re = regexp.MustCompile(`\n{3,}`)
+	body = re.ReplaceAllString(body, "\n\n")
+	return strings.TrimSpace(body)
+}
+
+// if email contains a meet/zoom/calendar link, force interview classification
+func hasInterviewLink(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "meet.google.com") ||
+		strings.Contains(lower, "zoom.us") ||
+		strings.Contains(lower, "teams.microsoft.com") ||
+		strings.Contains(lower, "calendly.com") ||
+		strings.Contains(lower, "cal.com/")
+}
+
+var schedulingDomains = map[string]bool{
+	"cal":        true,
+	"calendly":   true,
+	"zoom":       true,
+	"teams":      true,
+	"meet":       true,
+	"greenhouse": true,
+	"lever":      true,
+}
+
+func extractDomainCompany(from string) string {
+	re := regexp.MustCompile(`@([^.>]+)`)
+	matches := re.FindStringSubmatch(strings.ToLower(from))
+	if len(matches) > 1 {
+		domain := matches[1]
+		if schedulingDomains[domain] {
+			return ""
+		}
+		return domain
+	}
+	return ""
+}
+
+func extractCompanyFromBody(body string) string {
+	// look for email addresses in body and extract non-scheduling domains
+	re := regexp.MustCompile(`[\w.]+@([\w.-]+\.\w+)`)
+	matches := re.FindAllStringSubmatch(strings.ToLower(body), -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			domain := m[1]
+			// skip common non-company domains
+			skip := []string{"gmail.com", "cal.com", "google.com", "zoom.us", "microsoft.com", "calendly.com"}
+			isSkip := false
+			for _, s := range skip {
+				if strings.Contains(domain, s) {
+					isSkip = true
+					break
+				}
+			}
+			if !isSkip {
+				// return just the company part e.g. "pelo.tech" -> "pelo"
+				parts := strings.Split(domain, ".")
+				if len(parts) > 0 {
+					return parts[0]
+				}
+			}
+		}
+	}
+	return ""
 }

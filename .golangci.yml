@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      - linters: [errcheck]
+        source: "defer .*.Close"   # defer Close unchecked is idiomatic Go
+  settings:
+    govet:
+      disable:
+        - shadow
+        - fieldalignment
+
+run:
+  timeout: 5m

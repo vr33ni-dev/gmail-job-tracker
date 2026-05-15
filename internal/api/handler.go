@@ -33,6 +33,7 @@ func (h *Handler) Router() http.Handler {
 	r.Get("/api/applications/{id}/events", h.listEvents)
 	r.Post("/api/sync", h.triggerSync)
 	r.Post("/api/applications/{id}/correct", h.correctApplication)
+	r.Post("/api/applications/{id}/reviewed", h.markReviewed)
 
 	return r
 }
@@ -95,7 +96,7 @@ func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -146,4 +147,17 @@ func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]string{"status": "updated"})
+}
+
+func (h *Handler) markReviewed(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.MarkReviewed(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

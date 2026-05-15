@@ -58,7 +58,7 @@ Status rules:
   ✗ NOT INTERVIEW: "AI notetaker tool will be used" — still a regular interview, NOT ai_interview
   ✗ NOT INTERVIEW: Upwork job invitations ("invited to submit a proposal", "submit a proposal to work with") — classify as applied
 - offer: job offer received
-- rejected: not moving forward. Examples: "leider", "nicht berücksichtigen", "haben uns für andere Kandidaten entschieden", "unfortunately", "decided to move forward with other candidates", "we won't be moving forward", "we've filled the position"
+- rejected: not moving forward. Examples: "leider", "nicht berücksichtigen", "haben uns für andere Kandidaten entschieden", "unfortunately", "decided to move forward with other candidates", "decided to move forward with candidates", "we won't be moving forward", "we've filled the position", "we will not be moving forward", "not be progressing", "not progressing your application", "we are unable to move forward", "does not meet our current requirements", "more closely align with", "more closely matches"
 - withdrawn: candidate withdrew their application
 
 Platform detection — use sender domain:
