@@ -183,7 +183,8 @@ func (c *Client) MoveToLabel(ctx context.Context, messageID, labelName string) e
 	}
 
 	_, err = c.svc.Users.Messages.Modify("me", messageID, &gmail.ModifyMessageRequest{
-		AddLabelIds: []string{labelID},
+		AddLabelIds:    []string{labelID},
+		RemoveLabelIds: []string{"INBOX"},
 	}).Context(ctx).Do()
 	return err
 }
@@ -220,7 +221,8 @@ func (c *Client) BatchMoveToLabel(ctx context.Context, messageIDs []string, labe
 		return err
 	}
 	return c.svc.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
-		Ids:         messageIDs,
-		AddLabelIds: []string{labelID},
+		Ids:            messageIDs,
+		AddLabelIds:    []string{labelID},
+		RemoveLabelIds: []string{"INBOX"},
 	}).Context(ctx).Do()
 }
