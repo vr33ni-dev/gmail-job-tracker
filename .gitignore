@@ -6,4 +6,4 @@ docs/*
 .vscode/settings.json
 backup.sql
 .claude/
-db/corrections_backup.sql
+internal/db/corrections_backup.sql
