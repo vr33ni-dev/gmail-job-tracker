@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Demo",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/server/main.go",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DEMO": "true"
+      },
+      "envFile": "${workspaceFolder}/.env.demo"
+    }
+  ]
+}

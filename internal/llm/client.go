@@ -1,15 +1,11 @@
-package claude
+package llm
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
@@ -52,10 +48,13 @@ Status rules:
   ✓ INTERVIEW: "Are you available on 19.03.2026 14:00? Join: https://meet.google.com/xxx"
   ✓ INTERVIEW: "I'd like to invite you to a first interview. Book your slot: [calendar link]"
   ✓ INTERVIEW: "The next step is a take-home assignment" (human moving you forward)
+  ✓ INTERVIEW: "The next step is to answer a few questions" or "we'd like you to complete a short task" (written assessment — counts as interview even without a meeting link)
   ✓ INTERVIEW: "I enjoyed our conversation, we'd like to move forward" (human follow-up)
   ✗ NOT INTERVIEW: "I will have a new date for you by EOD tomorrow" (no commitment yet)
   ✗ NOT INTERVIEW: "Baran is on vacation, we are finding another team member" (no commitment yet)
   ✗ NOT INTERVIEW: "AI notetaker tool will be used" — still a regular interview, NOT ai_interview
+  ✗ NOT INTERVIEW: Zoom/calendar meeting notifications ("is inviting you to a scheduled Zoom meeting", "Join Zoom Meeting", meeting ID and passcode only) — these are calendar confirmations, set is_duplicate true
+  ✗ NOT INTERVIEW: Short conversational replies mid-process ("Yes, depends how many months", "Sure, let me check", "Thanks for the update") — set confidence "low" instead
   ✗ NOT INTERVIEW: Upwork job invitations ("invited to submit a proposal", "submit a proposal to work with") — classify as applied
 - offer: job offer received
 - rejected: not moving forward. Examples: "leider", "nicht berücksichtigen", "haben uns für andere Kandidaten entschieden", "unfortunately", "decided to move forward with other candidates", "decided to move forward with candidates", "we won't be moving forward", "we've filled the position", "we will not be moving forward", "not be progressing", "not progressing your application", "we are unable to move forward", "does not meet our current requirements", "more closely align with", "more closely matches"
@@ -72,175 +71,69 @@ Platform detection — use sender domain:
 
 IMPORTANT RULES:
 - Always extract company name from email body/signature, NEVER from sender domain (lever.co, greenhouse.io are ATS platforms not companies)
+- Do not invent, alter, or hallucinate company names. If the company is not clearly stated in the email text or signature, return company:"".
+- If the company is clearly ambiguous or only appears as a platform/ATS domain, return company:"" rather than guessing.
 - "role" must be the job title the candidate applied for — never interviewer names, team lead titles, meeting names, or email subjects
+  ✓ ROLE: "Senior Software Engineer", "Full Stack Developer", "Product Manager" (what the candidate applied for)
+  ✗ NOT ROLE: "Head of AI and Engineering", "VP of Product", "Engineering Manager" (these are the interviewer's title — extract from the body what the candidate applied for instead, or use "")
+  ✗ NOT ROLE: email subject lines, meeting titles, or department names
 - If role cannot be determined, use "" (empty string) — do not guess
 - Set confidence "low" if: newsletter, marketing/promotional, product announcement, or unrelated to a job application (contains "Newsletter", "nur solange der Vorrat reicht", "Abmelden", or is about products/sales)
 - Set confidence "high" if: email clearly relates to a specific job application with identifiable company and status
 - Set confidence "medium" if: email relates to a job application but company or status is ambiguous`
 
-func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string) (*domain.ParsedEmail, error) {
+func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (*domain.ParsedEmail, error) {
 	// build prompt with corrections injected
 	prompt := systemPrompt
 	if c.store != nil {
-
-		if corrections, err := c.store.GetRecentCorrections(ctx, 10); err == nil && len(corrections) > 0 {
-
-			prompt += "\n\nExamples from previous corrections (learn from these):\n"
+		if corrections, err := c.store.GetRecentCorrections(ctx, 20); err == nil && len(corrections) > 0 {
+			// split into rules (commands) and examples so rules are injected first
+			var rules, examples []domain.Correction
 			for _, cor := range corrections {
-				prompt += fmt.Sprintf("- Email: %q was classified as %s but correct classification is %s\n",
-					truncate(cor.EmailSubject+": "+cor.EmailBody, 100),
-					cor.WrongStatus,
-					cor.CorrectStatus,
-				)
+				if cor.Command != "" {
+					rules = append(rules, cor)
+				} else {
+					examples = append(examples, cor)
+				}
+			}
+			if len(rules) > 0 || len(examples) > 0 {
+				prompt += "\n\nPrevious corrections and rules (apply these):\n"
+			}
+			for _, cor := range rules {
+				prompt += fmt.Sprintf("- RULE: %s\n", cor.Command)
+			}
+			for _, cor := range examples {
+				excerpt := truncate(cor.EmailSubject+": "+cor.EmailBody, 200)
+				switch {
+				case cor.CorrectStatus == "skip":
+					prompt += fmt.Sprintf("- SKIP (set confidence low, is_duplicate true) emails like this — they are noise and should not create an application: %q\n", excerpt)
+				case cor.CorrectStatus == "conversation":
+					prompt += fmt.Sprintf("- CONVERSATION (set is_duplicate true) emails like this — they are part of an ongoing thread but not a new stage milestone: %q\n", excerpt)
+				case cor.WrongStatus != "" && cor.CorrectStatus != "":
+					prompt += fmt.Sprintf("- Email %q was classified as %s but correct classification is %s\n",
+						excerpt, cor.WrongStatus, cor.CorrectStatus)
+				}
 			}
 		}
+	}
+
+	// build existing-stages context to inject into the user message
+	var existingContext string
+	if len(existingStages) > 0 {
+		existingContext = "\n\nEXISTING_STAGES_SAME_STATUS (already recorded for this company+role):\n"
+		for i, s := range existingStages {
+			existingContext += fmt.Sprintf("%d. Date: %s | Email ID: %s\n",
+				i+1, s.AppliedAt.Format("2006-01-02 15:04"), s.LastEmailID)
+		}
+		existingContext += "\nAn interview stage is already recorded for this company. Default to is_duplicate: true (same interview conversation) UNLESS this email clearly announces a brand-new distinct event: explicit 'second interview', 'next round', 'technical interview', 'final round', 'coding challenge', new take-home assignment, a new specific future date/time being proposed in this email that differs from the stage dates listed above, or explicit progression language ('you passed', 'next step', 'I'd like to move you forward'). The interviewer being the same person does NOT make it a duplicate — a new date alone is enough. The following are always is_duplicate: true: calendar notifications ('your event is scheduled', 'you have an appointment'), scheduling replies, reminders, 'thank you for the interview' follow-ups, short conversational replies, and any email that does not itself invite you to something new."
 	}
 
 	switch c.provider {
 	case "claude":
-		return c.parseWithClaude(ctx, prompt, subject, body, from)
+		return c.parseWithClaude(ctx, prompt, subject, body, from, existingContext)
 	default:
-		return c.parseWithOllama(ctx, prompt, subject, body, from)
+		return c.parseWithOllama(ctx, prompt, subject, body, from, existingContext)
 	}
-}
-
-// ── Claude ───────────────────────────────────────────────────────────────────
-func (c *Client) parseWithClaude(ctx context.Context, prompt, subject, body, from string) (*domain.ParsedEmail, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-4-20250514",
-		"max_tokens": 300,
-		"system":     prompt,
-		"messages":   []msg{{Role: "user", Content: fmt.Sprintf("From: %s\nSubject: %s\n\n%s", from, subject, truncate(body, 2000))}},
-	})
-
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*2) * time.Second)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeAPIURL, bytes.NewReader(payload))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		defer resp.Body.Close()
-
-		b, _ := io.ReadAll(resp.Body)
-
-		if resp.StatusCode == 529 || resp.StatusCode == 503 {
-			lastErr = fmt.Errorf("claude %d: %s", resp.StatusCode, b)
-			continue
-		}
-		if resp.StatusCode == 400 {
-			if strings.Contains(string(b), "usage limits") {
-				return nil, fmt.Errorf("claude %d: %s", resp.StatusCode, b)
-			}
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("claude %d: %s", resp.StatusCode, b)
-		}
-
-		var out struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		}
-		if err := json.Unmarshal(b, &out); err != nil {
-			return nil, err
-		}
-		if len(out.Content) == 0 {
-			return nil, fmt.Errorf("empty claude response")
-		}
-
-		text := cleanJSON(out.Content[0].Text)
-		var parsed domain.ParsedEmail
-		if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-			return nil, fmt.Errorf("parse claude json: %w — raw: %s", err, text)
-		}
-		if parsed.Confidence == "" {
-			parsed.Confidence = "medium"
-		}
-		return &parsed, nil
-	}
-	return nil, lastErr
-}
-
-// ── Ollama ───────────────────────────────────────────────────────────────────
-func (c *Client) parseWithOllama(ctx context.Context, prompt, subject, body, from string) (*domain.ParsedEmail, error) {
-	model := os.Getenv("OLLAMA_MODEL")
-	if model == "" {
-		model = "llama3.1:8b"
-	}
-
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"model": model,
-		"messages": []msg{
-			{Role: "system", Content: prompt},
-			{Role: "user", Content: fmt.Sprintf("From: %s\nSubject: %s\n\n%s", from, subject, truncate(body, 2000))},
-		},
-		"max_tokens": 300,
-		"stream":     false,
-	})
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ollamaAPIURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ollama request failed — is ollama running? %w", err)
-	}
-	defer resp.Body.Close()
-
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama %d: %s", resp.StatusCode, b)
-	}
-
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
-	}
-	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("empty ollama response")
-	}
-
-	text := cleanJSON(out.Choices[0].Message.Content)
-	var parsed domain.ParsedEmail
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return nil, fmt.Errorf("parse ollama json: %w — raw: %s", err, text)
-	}
-	if parsed.Confidence == "" {
-		parsed.Confidence = "medium"
-	}
-	return &parsed, nil
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

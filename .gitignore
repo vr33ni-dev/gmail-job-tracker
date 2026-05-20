@@ -1,6 +1,9 @@
 .env
+.env.demo
 token.json
 seeds.sql
 docs/*
 .vscode/settings.json
 backup.sql
+.claude/
+db/corrections_backup.sql

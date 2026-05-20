@@ -84,7 +84,7 @@ cp .env.example .env
 ```bash
 go run cmd/server/main.go migrate
 # Apply db seed
-make db-reset
+make db-reset / make db-truncate # keep corrections, useful for re-syncs
 go run cmd/server/main.go  # wait for "migrations applied"
 # Ctrl+C
 make db-seed

@@ -19,8 +19,9 @@ func Config() *oauth2.Config {
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  "http://localhost:8080/auth/callback",
-		Scopes:       []string{gmail.GmailReadonlyScope, gmail.GmailModifyScope},
-		Endpoint:     google.Endpoint,
+		Scopes: []string{gmail.GmailReadonlyScope, gmail.GmailModifyScope, "https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile"},
+		Endpoint: google.Endpoint,
 	}
 }
 
@@ -65,6 +66,26 @@ func LoadToken() (*oauth2.Token, error) {
 	defer f.Close()
 	var token oauth2.Token
 	return &token, json.NewDecoder(f).Decode(&token)
+}
+
+type UserInfo struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+func FetchUserInfo(token *oauth2.Token) (*UserInfo, error) {
+	client := Config().Client(context.Background(), token)
+	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var userInfo UserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		return nil, err
+	}
+	return &userInfo, nil
 }
 
 func saveToken(token *oauth2.Token) error {

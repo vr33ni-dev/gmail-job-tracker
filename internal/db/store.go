@@ -26,110 +26,54 @@ func New(dsn string) (*Store, error) {
 
 func (s *Store) DB() *sql.DB { return s.db }
 
-func (s *Store) ListStatusEvents(ctx context.Context, applicationID int64) ([]domain.StatusEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, application_id, from_status, to_status, email_id, email_subject, parsed_at
-		FROM status_events WHERE application_id=$1 ORDER BY parsed_at ASC`, applicationID)
+// FindOrCreateApplication finds an existing application by company+role or creates one.
+// Returns the application ID.
+func (s *Store) FindOrCreateApplication(ctx context.Context, company, role, platform, language, url string, appliedAt time.Time) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM applications WHERE LOWER(company)=LOWER($1) AND LOWER(role)=LOWER($2) LIMIT 1`,
+		company, role,
+	).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	err = s.db.QueryRowContext(ctx,
+		`INSERT INTO applications (company, role, platform, language, url, applied_at)
+		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		company, role, platform, language, url, appliedAt,
+	).Scan(&id)
+	return id, err
+}
+
+// FindOrCreateApplication finds an existing application by company+role or creates one.
+// Returns the application ID.
+func (s *Store) FindApplicationById(ctx context.Context, id int64) (*domain.Application, error) {
+	var app domain.Application
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, company, role, platform, language, url, applied_at FROM applications WHERE id = $1`,
+		id,
+	).Scan(&app.ID, &app.Company, &app.Role, &app.Platform, &app.Language, &app.URL, &app.AppliedAt)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var events []domain.StatusEvent
-	for rows.Next() {
-		var e domain.StatusEvent
-		if err := rows.Scan(&e.ID, &e.ApplicationID, &e.FromStatus, &e.ToStatus,
-			&e.EmailID, &e.EmailSubject, &e.ParsedAt); err != nil {
-			return nil, err
-		}
-		events = append(events, e)
-	}
-	return events, rows.Err()
+	return &app, nil
+}
+
+// CreateStage inserts a new application_stages row and returns the stage ID.
+func (s *Store) CreateStage(ctx context.Context, applicationID int64, status domain.Status, lastEmailID string, needsReview bool, appliedAt time.Time) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO application_stages (application_id, status, last_email_id, needs_review, applied_at)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		applicationID, status, lastEmailID, needsReview, appliedAt,
+	).Scan(&id)
+	return id, err
 }
 
 func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
-		FROM applications ORDER BY applied_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []domain.Application
-	for rows.Next() {
-		var a domain.Application
-		var lastEmailID, emailBody, language, notes, url sql.NullString
-		if err := rows.Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-			&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
-			&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt); err != nil {
-			return nil, err
-		}
-		a.LastEmailID = lastEmailID.String
-		a.EmailBody = emailBody.String
-		a.Language = language.String
-		a.Notes = notes.String
-		a.URL = url.String
-		apps = append(apps, a)
-	}
-	return apps, rows.Err()
-}
-
-func (s *Store) UpsertApplication(ctx context.Context, a *domain.Application) error {
-	return s.db.QueryRowContext(ctx, `
-		INSERT INTO applications (company, role, platform, applied_at, status, last_email_id, email_body, language, url, needs_review)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (id) DO UPDATE
-		SET status=EXCLUDED.status, last_email_id=EXCLUDED.last_email_id,
-		    email_body=EXCLUDED.email_body, needs_review=EXCLUDED.needs_review, updated_at=NOW()
-		RETURNING id, created_at, updated_at`,
-		a.Company, a.Role, a.Platform, a.AppliedAt, a.Status,
-		a.LastEmailID, a.EmailBody, a.Language, a.URL, a.NeedsReview,
-	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
-}
-
-func (s *Store) UpdateStatus(ctx context.Context, id int64, status domain.Status, emailID, emailBody string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE applications SET status=$1, last_email_id=$2, email_body=$3, updated_at=NOW() WHERE id=$4`,
-		status, emailID, emailBody, id)
-	return err
-}
-
-func (s *Store) FindByCompanyAndRole(ctx context.Context, company, role string) (*domain.Application, error) {
-	var a domain.Application
-	var lastEmailID, emailBody, language, notes, url sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
-		FROM applications
-		WHERE (
-			LOWER(company) = LOWER($1)
-			OR LOWER(company) LIKE '%' || LOWER($1) || '%'
-			OR LOWER($1) LIKE '%' || LOWER(company) || '%'
-		)
-		AND (
-			LOWER(role) = LOWER($2)
-			OR LOWER(role) LIKE '%' || LOWER($2) || '%'
-			OR LOWER($2) LIKE '%' || LOWER(role) || '%'
-		)
-		ORDER BY applied_at DESC
-		LIMIT 1`, company, role,
-	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
-		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	a.LastEmailID = lastEmailID.String
-	a.EmailBody = emailBody.String
-	a.Language = language.String
-	a.Notes = notes.String
-	a.URL = url.String
-	return &a, nil
-}
-
-func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedApplication, error) {
-	// load aliases
 	aliases := make(map[string]string)
 	aliasRows, err := s.db.QueryContext(ctx, `SELECT alias, canonical FROM company_aliases`)
 	if err == nil {
@@ -143,74 +87,18 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, company, role, platform, language, url, status, applied_at, email_body, last_email_id, needs_review
-		FROM applications
-		ORDER BY company, role, applied_at ASC`)
+		SELECT a.id, a.company, a.role, a.platform, a.language, a.url, a.applied_at,
+		       s.id, s.status, s.last_email_id, s.needs_review, s.applied_at
+		FROM applications a
+		JOIN application_stages s ON s.application_id = a.id
+		ORDER BY a.company, a.role, s.applied_at ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	type raw struct {
-		id          int64
-		company     string
-		role        string
-		platform    string
-		language    string
-		url         string
-		status      domain.Status
-		appliedAt   time.Time
-		emailBody   string
-		lastEmailID string
-		needsReview bool
-	}
-
-	groupMap := make(map[string]*domain.GroupedApplication)
-	var order []string
-
-	for rows.Next() {
-		var r raw
-		var emailBody, lastEmailID, language, url sql.NullString
-		if err := rows.Scan(&r.id, &r.company, &r.role, &r.platform,
-			&language, &url, &r.status, &r.appliedAt, &emailBody, &lastEmailID, &r.needsReview); err != nil {
-			return nil, err
-		}
-		r.emailBody = emailBody.String
-		r.lastEmailID = lastEmailID.String
-		r.language = language.String
-		r.url = url.String
-
-		// resolve company alias
-		company := r.company
-		if canonical, ok := aliases[strings.ToLower(r.company)]; ok {
-			company = canonical
-		}
-
-		key := strings.ToLower(company) + "|" + strings.ToLower(domain.NormalizeRole(r.role))
-		if _, exists := groupMap[key]; !exists {
-			groupMap[key] = &domain.GroupedApplication{
-				Company:   company,
-				Role:      domain.NormalizeRole(r.role),
-				Platform:  r.platform,
-				Language:  r.language,
-				URL:       r.url,
-				AppliedAt: r.appliedAt,
-			}
-			order = append(order, key)
-		}
-
-		groupMap[key].Stages = append(groupMap[key].Stages, domain.ApplicationStage{
-			ID:          r.id,
-			Status:      r.status,
-			AppliedAt:   r.appliedAt,
-			EmailBody:   r.emailBody,
-			LastEmailID: r.lastEmailID,
-			NeedsReview: r.needsReview,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+	appMap := make(map[int64]*domain.Application)
+	var order []int64
 
 	statusPriority := map[domain.Status]int{
 		domain.StatusApplied:     1,
@@ -221,207 +109,238 @@ func (s *Store) ListGroupedApplications(ctx context.Context) ([]domain.GroupedAp
 		domain.StatusWithdrawn:   6,
 	}
 
-	result := make([]domain.GroupedApplication, 0, len(order))
-	for _, key := range order {
-		g := groupMap[key]
-
-		var best domain.Status
-		for _, stage := range g.Stages {
-			if best == "" {
-				best = stage.Status
-				continue
+	for rows.Next() {
+		var appID int64
+		var company, role, platform, language, url string
+		var appAppliedAt time.Time
+		var stage domain.ApplicationStage
+		if err := rows.Scan(
+			&appID, &company, &role, &platform, &language, &url, &appAppliedAt,
+			&stage.ID, &stage.Status, &stage.LastEmailID, &stage.NeedsReview, &stage.AppliedAt,
+		); err != nil {
+			return nil, err
+		}
+		if canonical, ok := aliases[strings.ToLower(company)]; ok {
+			company = canonical
+		}
+		stage.ApplicationID = appID
+		if _, exists := appMap[appID]; !exists {
+			appMap[appID] = &domain.Application{
+				ID:        appID,
+				Company:   company,
+				Role:      domain.NormalizeRole(role),
+				Platform:  platform,
+				Language:  language,
+				URL:       url,
+				AppliedAt: appAppliedAt,
 			}
-			if statusPriority[stage.Status] > statusPriority[best] {
-				best = stage.Status
+			order = append(order, appID)
+		}
+		app := appMap[appID]
+		app.Stages = append(app.Stages, stage)
+		if stage.AppliedAt.After(app.LastUpdatedAt) {
+			app.LastUpdatedAt = stage.AppliedAt
+		}
+		if statusPriority[stage.Status] > statusPriority[app.CurrentStatus] {
+			app.CurrentStatus = stage.Status
+			if stage.LastEmailID != "" {
+				app.GmailURL = "https://mail.google.com/mail/u/0/#all/" + stage.LastEmailID
 			}
 		}
-		g.CurrentStatus = best
-		result = append(result, *g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
+	result := make([]domain.Application, 0, len(order))
+	for _, id := range order {
+		result = append(result, *appMap[id])
+	}
 	return result, nil
 }
 
-func (s *Store) FindByCompanyRoleAndStatus(ctx context.Context, company, role string, status domain.Status) (*domain.Application, error) {
-	var a domain.Application
-	var lastEmailID, emailBody, language, notes, url sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
-		FROM applications
-		WHERE (
-			LOWER(company) = LOWER($1)
-			OR LOWER(company) LIKE '%' || LOWER($1) || '%'
-			OR LOWER($1) LIKE '%' || LOWER(company) || '%'
-		)
-		AND (
-			LOWER(role) = LOWER($2)
-			OR LOWER(role) LIKE '%' || LOWER($2) || '%'
-			OR LOWER($2) LIKE '%' || LOWER(role) || '%'
-		)
-		AND status = $3
-		ORDER BY applied_at DESC
-		LIMIT 1`, company, role, status,
-	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
-		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
+func (s *Store) GetStageByID(ctx context.Context, stageID int64) (*domain.ApplicationStage, error) {
+	var st domain.ApplicationStage
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, application_id, status, last_email_id, needs_review, applied_at
+		 FROM application_stages WHERE id=$1`, stageID,
+	).Scan(&st.ID, &st.ApplicationID, &st.Status, &st.LastEmailID, &st.NeedsReview, &st.AppliedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func (s *Store) GetApplicationByStageID(ctx context.Context, stageID int64) (*domain.Application, error) {
+	var app domain.Application
+	err := s.db.QueryRowContext(ctx,
+		`SELECT a.id, a.company, a.role, a.platform, a.language, a.url, a.applied_at
+		 FROM applications a
+		 JOIN application_stages s ON s.application_id = a.id
+		 WHERE s.id=$1`, stageID,
+	).Scan(&app.ID, &app.Company, &app.Role, &app.Platform, &app.Language, &app.URL, &app.AppliedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
+func (s *Store) FindApplicationByCompanyAndRole(ctx context.Context, company, role string) (*domain.Application, error) {
+	var app domain.Application
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, company, role, platform, language, url, applied_at
+		 FROM applications
+		 WHERE LOWER(company)=LOWER($1) AND LOWER(role)=LOWER($2)
+		 LIMIT 1`, company, role,
+	).Scan(&app.ID, &app.Company, &app.Role, &app.Platform, &app.Language, &app.URL, &app.AppliedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	a.LastEmailID = lastEmailID.String
-	a.EmailBody = emailBody.String
-	a.Language = language.String
-	a.Notes = notes.String
-	a.URL = url.String
-	return &a, nil
+	return &app, nil
 }
 
-func (s *Store) IsEmailProcessed(ctx context.Context, emailID string) (bool, error) {
-	var exists bool
+func (s *Store) FindMostRecentByCompany(ctx context.Context, company string) (*domain.Application, error) {
+	var app domain.Application
 	err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM processed_emails WHERE email_id=$1)`, emailID).Scan(&exists)
-	return exists, err
-}
-
-func (s *Store) MarkEmailProcessed(ctx context.Context, emailID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO processed_emails (email_id) VALUES ($1) ON CONFLICT DO NOTHING`, emailID)
-	return err
-}
-
-func (s *Store) RecordStatusEvent(ctx context.Context, e *domain.StatusEvent) error {
-	return s.db.QueryRowContext(ctx, `
-		INSERT INTO status_events (application_id, from_status, to_status, email_id, email_subject)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id, parsed_at`,
-		e.ApplicationID, e.FromStatus, e.ToStatus, e.EmailID, e.EmailSubject,
-	).Scan(&e.ID, &e.ParsedAt)
-}
-
-func (s *Store) LastPollTime(ctx context.Context) (time.Time, error) {
-	var t time.Time
-	err := s.db.QueryRowContext(ctx,
-		`SELECT MAX(processed_at) FROM processed_emails`).Scan(&t)
-	if err == sql.ErrNoRows || t.IsZero() {
-		return time.Now().Add(-90 * 24 * time.Hour), nil
+		`SELECT id, company, role, platform, language, url, applied_at
+		 FROM applications
+		 WHERE LOWER(company)=LOWER($1) AND role != ''
+		 ORDER BY applied_at DESC LIMIT 1`, company,
+	).Scan(&app.ID, &app.Company, &app.Role, &app.Platform, &app.Language, &app.URL, &app.AppliedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	return t, err
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
 }
 
-func (s *Store) AddCorrection(ctx context.Context, emailID, emailSubject, emailBody string, wrongStatus, correctStatus domain.Status) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO corrections (email_id, email_subject, email_body, wrong_status, correct_status)
-		VALUES ($1, $2, $3, $4, $5)`,
-		emailID, emailSubject, emailBody, wrongStatus, correctStatus)
+func (s *Store) UpdateStageStatus(ctx context.Context, stageID int64, status domain.Status, lastEmailID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE application_stages SET status=$1, last_email_id=$2, updated_at=NOW() WHERE id=$3`,
+		status, lastEmailID, stageID)
 	return err
 }
 
-func (s *Store) GetRecentCorrections(ctx context.Context, limit int) ([]domain.Correction, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT email_subject, email_body, wrong_status, correct_status
-		FROM corrections ORDER BY created_at DESC LIMIT $1`, limit)
+func (s *Store) DeleteStage(ctx context.Context, stageID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM application_stages WHERE id=$1`, stageID)
+	return err
+}
+
+func (s *Store) MarkStageReviewed(ctx context.Context, stageID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE application_stages SET needs_review=false WHERE id=$1`, stageID)
+	return err
+}
+
+func (s *Store) GetStagesByStatus(ctx context.Context, applicationID int64, status domain.Status) ([]domain.ApplicationStage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, application_id, status, last_email_id, needs_review, applied_at
+		 FROM application_stages
+		 WHERE application_id=$1 AND status=$2
+		 ORDER BY applied_at ASC`,
+		applicationID, status,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var corrections []domain.Correction
+	var stages []domain.ApplicationStage
 	for rows.Next() {
-		var c domain.Correction
-		if err := rows.Scan(&c.EmailSubject, &c.EmailBody, &c.WrongStatus, &c.CorrectStatus); err != nil {
+		var st domain.ApplicationStage
+		if err := rows.Scan(&st.ID, &st.ApplicationID, &st.Status, &st.LastEmailID, &st.NeedsReview, &st.AppliedAt); err != nil {
 			return nil, err
 		}
-		corrections = append(corrections, c)
+		stages = append(stages, st)
 	}
-	return corrections, rows.Err()
+	return stages, rows.Err()
 }
 
-func (s *Store) GetApplication(ctx context.Context, id int64) (*domain.Application, error) {
-	var a domain.Application
-	var lastEmailID, emailBody, language, notes, url sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
-		FROM applications WHERE id=$1`, id,
-	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
-		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
-	if err != nil {
-		return nil, err
-	}
-	a.LastEmailID = lastEmailID.String
-	a.EmailBody = emailBody.String
-	a.Language = language.String
-	a.Notes = notes.String
-	a.URL = url.String
-	return &a, nil
+func (s *Store) HasAppliedStage(ctx context.Context, applicationID int64) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM application_stages WHERE application_id=$1 AND status='applied')`,
+		applicationID,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) ApplicationExistsByEmailID(ctx context.Context, emailID string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM applications WHERE last_email_id=$1)`, emailID,
+		`SELECT EXISTS(SELECT 1 FROM application_stages WHERE last_email_id=$1)`, emailID,
 	).Scan(&exists)
 	return exists, err
 }
 
-func (s *Store) FindMostRecentByCompany(ctx context.Context, company string) (*domain.Application, error) {
-	var a domain.Application
-	var lastEmailID, emailBody, language, notes, url sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, company, role, platform, applied_at, status, last_email_id, email_body, language, notes, url, needs_review, created_at, updated_at
-		FROM applications
-		WHERE LOWER(company) = LOWER($1) AND role != ''
-		ORDER BY applied_at DESC LIMIT 1`, company,
-	).Scan(&a.ID, &a.Company, &a.Role, &a.Platform, &a.AppliedAt,
-		&a.Status, &lastEmailID, &emailBody, &language, &notes, &url,
-		&a.NeedsReview, &a.CreatedAt, &a.UpdatedAt)
+func (s *Store) GetStageByLastEmailID(ctx context.Context, emailID string) (*domain.ApplicationStage, error) {
+	var st domain.ApplicationStage
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, application_id, status, last_email_id, needs_review, applied_at
+		 FROM application_stages WHERE last_email_id=$1 LIMIT 1`, emailID,
+	).Scan(&st.ID, &st.ApplicationID, &st.Status, &st.LastEmailID, &st.NeedsReview, &st.AppliedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	return &st, err
+}
+
+func (s *Store) GetAllJobEmailIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT email_id FROM thread_emails`)
 	if err != nil {
 		return nil, err
 	}
-	a.LastEmailID = lastEmailID.String
-	a.EmailBody = emailBody.String
-	a.Language = language.String
-	a.Notes = notes.String
-	a.URL = url.String
-	return &a, nil
-}
-
-func (s *Store) ResolveCompanyAlias(ctx context.Context, company string) string {
-	var canonical string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT canonical FROM company_aliases WHERE LOWER(alias)=LOWER($1)`, company,
-	).Scan(&canonical)
-	if err != nil {
-		return company
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
 	}
-	return canonical
+	return ids, rows.Err()
 }
 
-func (s *Store) GetSetting(ctx context.Context, key string) string {
-	var value string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT value FROM settings WHERE key=$1`, key,
-	).Scan(&value)
+func (s *Store) GetThreadIDsByApplication(ctx context.Context, applicationID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT thread_id FROM thread_emails WHERE application_id=$1 AND thread_id != ''`,
+		applicationID)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	return value
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
-func (s *Store) HasAppliedStage(ctx context.Context, company, role string) (bool, error) {
-	var exists bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM applications
-			WHERE LOWER(company)=LOWER($1)
-			AND (LOWER(role)=LOWER($2) OR $2='')
-			AND status='applied'
-		)`, company, role,
-	).Scan(&exists)
-	return exists, err
+func (s *Store) GetAllJobThreadIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT thread_id FROM thread_emails WHERE application_id IS NOT NULL AND thread_id != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) FixEmptyRoles(ctx context.Context) error {
@@ -441,33 +360,341 @@ func (s *Store) FixEmptyRoles(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) MarkReviewed(ctx context.Context, id int64) error {
+
+
+func (s *Store) IsEmailProcessed(ctx context.Context, emailID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM processed_emails WHERE email_id=$1)`, emailID).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) MarkEmailProcessed(ctx context.Context, emailID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE applications SET needs_review=false WHERE id=$1`, id)
+		`INSERT INTO processed_emails (email_id) VALUES ($1) ON CONFLICT DO NOTHING`, emailID)
 	return err
 }
 
-func (s *Store) GetEmailIDsForInterviewApplications(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT last_email_id
-		FROM applications
-		WHERE last_email_id != ''
-		AND (LOWER(company), LOWER(role)) IN (
-			SELECT LOWER(company), LOWER(role)
-			FROM applications
-			WHERE status IN ('interview', 'ai_interview')
-		)`)
+func (s *Store) LastPollTime(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(processed_at) FROM processed_emails`).Scan(&t)
+	if err == sql.ErrNoRows || t.IsZero() {
+		return time.Now().Add(-120 * 24 * time.Hour), nil
+	}
+	return t, err
+}
+
+func (s *Store) UnmarkEmailProcessed(ctx context.Context, emailID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM processed_emails WHERE email_id = $1`, emailID)
+	return err
+}
+
+func (s *Store) IsEmailInThreadEmails(ctx context.Context, emailID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM thread_emails WHERE email_id = $1)`, emailID).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) FindApplicationByPersonName(ctx context.Context, name string) (*domain.Application, error) {
+	var appID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT te.application_id FROM thread_emails te
+		 WHERE te.body ILIKE $1 OR te.subject ILIKE $1 OR te.from_addr ILIKE $1
+		 ORDER BY te.email_date DESC LIMIT 1`,
+		"%"+name+"%",
+	).Scan(&appID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.FindApplicationById(ctx, appID)
+}
+
+// HasSchedulingEmailForApp returns true if the application already has a
+// thread email from a scheduling service (cal.com, calendly, etc.).
+func (s *Store) HasSchedulingEmailForApp(ctx context.Context, appID int64) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM thread_emails
+			WHERE application_id = $1 AND (
+				from_addr ILIKE '%cal.com%' OR
+				from_addr ILIKE '%calendly.com%' OR
+				from_addr ILIKE '%savvycal.com%' OR
+				from_addr ILIKE '%chilipiper.com%'
+			)
+		)`, appID,
+	).Scan(&exists)
+	return exists, err
+}
+
+// GetContactFromAddrsForApp returns distinct from_addr values for non-scheduling
+// senders in the application's thread emails — used to find related scheduling
+// emails by contact name.
+func (s *Store) GetContactFromAddrsForApp(ctx context.Context, appID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT from_addr FROM thread_emails
+		 WHERE application_id = $1
+		 AND from_addr NOT ILIKE '%cal.com%'
+		 AND from_addr NOT ILIKE '%calendly.com%'
+		 AND from_addr NOT ILIKE '%noreply%'
+		 AND from_addr NOT ILIKE '%no-reply%'
+		 LIMIT 5`,
+		appID,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	var addrs []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var addr string
+		if err := rows.Scan(&addr); err == nil && addr != "" {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs, rows.Err()
+}
+
+func (s *Store) AddCorrection(ctx context.Context, emailID, emailSubject, emailBody string, wrongStatus domain.Status, correctStatus string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO corrections (email_id, email_subject, email_body, wrong_status, correct_status)
+		VALUES ($1, $2, $3, $4, $5)`,
+		emailID, emailSubject, emailBody, wrongStatus, correctStatus)
+	return err
+}
+
+func (s *Store) AddCorrectionRule(ctx context.Context, rule string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO corrections (command) VALUES ($1)`, rule)
+	return err
+}
+
+func (s *Store) GetRecentCorrections(ctx context.Context, limit int) ([]domain.Correction, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT email_subject, email_body, COALESCE(wrong_status,''), COALESCE(correct_status,''), COALESCE(command,'')
+		FROM corrections ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var corrections []domain.Correction
+	for rows.Next() {
+		var c domain.Correction
+		if err := rows.Scan(&c.EmailSubject, &c.EmailBody, &c.WrongStatus, &c.CorrectStatus, &c.Command); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		corrections = append(corrections, c)
 	}
-	return ids, rows.Err()
+	return corrections, rows.Err()
+}
+
+// GetThreadApplicationID returns the application_id already linked to any email in
+// the given thread, or 0 if the thread is not yet associated with an application.
+func (s *Store) GetThreadApplicationID(ctx context.Context, threadID string) int64 {
+	if threadID == "" {
+		return 0
+	}
+	var appID int64
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT application_id FROM thread_emails WHERE thread_id=$1 AND application_id IS NOT NULL LIMIT 1`,
+		threadID).Scan(&appID)
+	return appID
+}
+
+// StoreThreadEmail persists an email into thread_emails linked to the given application.
+// Emails without a known application (applicationID == 0) are silently dropped — only
+// definitively-linked emails belong in this table.
+func (s *Store) StoreThreadEmail(ctx context.Context, emailID, threadID, from, subject, body string, date time.Time, applicationID int64) error {
+	if applicationID == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO thread_emails (email_id, thread_id, from_addr, subject, body, email_date, application_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (email_id) DO UPDATE SET body = EXCLUDED.body WHERE thread_emails.body = ''`,
+		emailID, threadID, from, subject, body, date, applicationID)
+	return err
+}
+
+func (s *Store) LinkThreadEmailToStage(ctx context.Context, emailID string, stageID int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE thread_emails SET stage_id=$1 WHERE email_id=$2`,
+		stageID, emailID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("thread email not found: email_id=%s", emailID)
+	}
+	return nil
+}
+
+// TagThreadEmailsForApplication re-tags all emails in a thread to the given application.
+// Used by the promote endpoint when the user explicitly assigns a thread to an application.
+func (s *Store) TagThreadEmailsForApplication(ctx context.Context, threadID string, applicationID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE thread_emails SET application_id=$1 WHERE thread_id=$2`,
+		applicationID, threadID)
+	return err
+}
+
+func (s *Store) GetThreadEmailBody(ctx context.Context, emailID string) string {
+	if emailID == "" {
+		return ""
+	}
+	var body string
+	_ = s.db.QueryRowContext(ctx, `SELECT body FROM thread_emails WHERE email_id=$1`, emailID).Scan(&body)
+	return body
+}
+
+func (s *Store) GetThreadEmailSubjectAndBody(ctx context.Context, emailID string) (subject, body string) {
+	if emailID == "" {
+		return "", ""
+	}
+	_ = s.db.QueryRowContext(ctx, `SELECT subject, body FROM thread_emails WHERE email_id=$1`, emailID).Scan(&subject, &body)
+	return subject, body
+}
+
+func (s *Store) GetThreadEmailSubjectBodyDate(ctx context.Context, emailID string) (subject, body string, emailDate time.Time, err error) {
+	if emailID == "" {
+		return "", "", time.Time{}, nil
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT subject, body, email_date FROM thread_emails WHERE email_id=$1`, emailID).Scan(&subject, &body, &emailDate)
+	if err == sql.ErrNoRows {
+		return "", "", time.Time{}, nil
+	}
+	return
+}
+
+func (s *Store) GetJourney(ctx context.Context, applicationID int64) ([]domain.ThreadConversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT te.id, te.email_id, te.thread_id, te.stage_id, te.from_addr, te.subject, te.body, te.email_date
+		FROM thread_emails te
+		WHERE te.application_id = $1
+		   OR te.thread_id IN (
+		       SELECT DISTINCT thread_id FROM thread_emails
+		       WHERE application_id = $1 AND thread_id != ''
+		   )
+		ORDER BY te.email_date ASC`, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var emails []domain.ThreadEmail
+	for rows.Next() {
+		var e domain.ThreadEmail
+		var stageID sql.NullInt64
+		if err := rows.Scan(&e.ID, &e.EmailID, &e.ThreadID, &stageID,
+			&e.FromAddr, &e.Subject, &e.Body, &e.EmailDate); err != nil {
+			return nil, err
+		}
+		if stageID.Valid {
+			e.StageID = &stageID.Int64
+			e.IsStage = true
+		}
+		emails = append(emails, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return groupEmailsByStage(emails), nil
+}
+
+func groupEmailsByStage(emails []domain.ThreadEmail) []domain.ThreadConversation {
+	var stageIdx []int
+	for i, e := range emails {
+		if e.IsStage {
+			stageIdx = append(stageIdx, i)
+		}
+	}
+	if len(stageIdx) == 0 {
+		return []domain.ThreadConversation{}
+	}
+	result := make([]domain.ThreadConversation, len(stageIdx))
+	for k, si := range stageIdx {
+		result[k] = domain.ThreadConversation{Stage: emails[si], Conversation: []domain.ThreadEmail{}}
+	}
+	for i, e := range emails {
+		if e.IsStage {
+			continue
+		}
+		groupIdx := 0
+		for k, si := range stageIdx {
+			if si <= i {
+				groupIdx = k
+			}
+		}
+		result[groupIdx].Conversation = append(result[groupIdx].Conversation, e)
+	}
+	return result
+}
+
+func (s *Store) ResolveCompanyAlias(ctx context.Context, company string) string {
+	var canonical string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT canonical FROM company_aliases WHERE LOWER(alias)=LOWER($1)`, company,
+	).Scan(&canonical)
+	if err != nil {
+		return company
+	}
+	return canonical
+}
+
+// FixAppliedStageDate backdates an applied stage if it falls after an existing interview.
+func (s *Store) FixAppliedStageDate(ctx context.Context, applicationID, appliedStageID int64) error {
+	var earliest time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT MIN(applied_at) FROM application_stages
+		WHERE application_id=$1 AND status IN ('interview','ai_interview')`,
+		applicationID,
+	).Scan(&earliest)
+	if err != nil || earliest.IsZero() {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE application_stages SET applied_at=$1, updated_at=NOW()
+		WHERE id=$2 AND applied_at > $1`,
+		earliest.Add(-1*time.Hour), appliedStageID)
+	return err
+}
+
+// FixAllAppliedStageDates fixes applied stage dates across all applications.
+func (s *Store) FixAllAppliedStageDates(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE application_stages AS ap
+		SET applied_at = earliest.min_interview - INTERVAL '1 hour', updated_at = NOW()
+		FROM (
+			SELECT application_id, MIN(applied_at) AS min_interview
+			FROM application_stages
+			WHERE status IN ('interview', 'ai_interview')
+			GROUP BY application_id
+		) AS earliest
+		WHERE ap.application_id = earliest.application_id
+		AND ap.status = 'applied'
+		AND ap.applied_at > earliest.min_interview`); err != nil {
+		return err
+	}
+	// Sync applications.applied_at to match the earliest stage date.
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE applications a
+		SET applied_at = (
+			SELECT MIN(s.applied_at) FROM application_stages s WHERE s.application_id = a.id
+		), updated_at = NOW()
+		WHERE EXISTS (SELECT 1 FROM application_stages s WHERE s.application_id = a.id)
+		AND a.applied_at != (
+			SELECT MIN(s.applied_at) FROM application_stages s WHERE s.application_id = a.id
+		)`)
+	return err
+}
+
+func (s *Store) GetSetting(ctx context.Context, key string) string {
+	var value string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=$1`, key).Scan(&value)
+	return value
 }

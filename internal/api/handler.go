@@ -6,9 +6,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
@@ -16,69 +17,76 @@ import (
 
 type Handler struct {
 	store *db.Store
-	sync  *syncsvc.Service // nil until Gmail is connected
+	sync  *syncsvc.Service
 }
 
-func NewHandler(store *db.Store, sync *syncsvc.Service) *Handler {
-	return &Handler{store: store, sync: sync}
-}
-
-func (h *Handler) Router() http.Handler {
-	r := chi.NewRouter()
-	r.Use(middleware.Logger, middleware.Recoverer)
-	r.Use(corsMiddleware)
-
-	r.Get("/api/applications", h.listApplications)
-	r.Post("/api/applications", h.createApplication)
-	r.Get("/api/applications/{id}/events", h.listEvents)
-	r.Post("/api/sync", h.triggerSync)
-	r.Post("/api/applications/{id}/correct", h.correctApplication)
-	r.Post("/api/applications/{id}/reviewed", h.markReviewed)
-
-	return r
-}
-
-func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
+func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if auth.IsConnected() {
+		_, _ = w.Write([]byte(`{"connected":true}`))
+	} else {
+		_, _ = w.Write([]byte(`{"connected":false}`))
 	}
-	events, err := h.store.ListStatusEvents(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if events == nil {
-		events = []domain.StatusEvent{}
-	}
-	writeJSON(w, events)
 }
 
 func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request) {
-	apps, err := h.store.ListGroupedApplications(r.Context())
+	apps, err := h.store.ListApplications(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if apps == nil {
-		apps = []domain.GroupedApplication{}
+		apps = []domain.Application{}
 	}
 	writeJSON(w, apps)
 }
 
+func (h *Handler) getApplicationById(w http.ResponseWriter, r *http.Request) {
+	appID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	app, err := h.store.FindApplicationById(r.Context(), appID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if app == nil {
+		http.Error(w, "application not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, app)
+}
+
 func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request) {
-	var app domain.Application
-	if err := json.NewDecoder(r.Body).Decode(&app); err != nil {
+	var req struct {
+		Company  string `json:"company"`
+		Role     string `json:"role"`
+		Platform string `json:"platform"`
+		Language string `json:"language"`
+		Status   string `json:"status"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.store.UpsertApplication(r.Context(), &app); err != nil {
+	if req.Status == "" {
+		req.Status = "applied"
+	}
+	appID, err := h.store.FindOrCreateApplication(r.Context(), req.Company, req.Role, req.Platform, req.Language, req.URL, time.Now())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	stageID, err := h.store.CreateStage(r.Context(), appID, domain.Status(req.Status), "", false, time.Now())
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, app)
+	writeJSON(w, map[string]int64{"application_id": appID, "stage_id": stageID})
 }
 
 func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +100,209 @@ func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, map[string]string{"status": "sync triggered"})
+}
+
+func (h *Handler) syncCompany(w http.ResponseWriter, r *http.Request) {
+	if h.sync == nil {
+		http.Error(w, `{"error":"gmail not connected"}`, http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Company string `json:"company"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Company == "" {
+		http.Error(w, "company name required", http.StatusBadRequest)
+		return
+	}
+	go func() {
+		if err := h.sync.SyncCompany(context.Background(), req.Company); err != nil {
+			log.Printf("company sync error: %v", err)
+		}
+	}()
+	writeJSON(w, map[string]string{"status": "sync triggered", "company": req.Company})
+}
+
+func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, []domain.StatusEvent{})
+}
+
+func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
+	stageID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stage, err := h.store.GetStageByID(r.Context(), stageID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
+	newStatus := domain.Status(body.Status)
+	if err := h.store.AddCorrection(r.Context(), stage.LastEmailID, emailSubject, emailBody, stage.Status, string(newStatus)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.store.UpdateStageStatus(r.Context(), stageID, newStatus, stage.LastEmailID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "updated"})
+}
+
+func (h *Handler) deleteApplication(w http.ResponseWriter, r *http.Request) {
+	stageID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	stage, err := h.store.GetStageByID(r.Context(), stageID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if stage.LastEmailID != "" {
+		emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
+		_ = h.store.AddCorrection(r.Context(), stage.LastEmailID, emailSubject, emailBody, stage.Status, "skip")
+	}
+	if err := h.store.DeleteStage(r.Context(), stageID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) demoteApplication(w http.ResponseWriter, r *http.Request) {
+	stageID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	stage, err := h.store.GetStageByID(r.Context(), stageID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if stage.LastEmailID != "" {
+		emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
+		_ = h.store.AddCorrection(r.Context(), stage.LastEmailID, emailSubject, emailBody, stage.Status, "conversation")
+	}
+	if err := h.store.DeleteStage(r.Context(), stageID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// promoteThreadEmail promotes a thread email to an application stage with a specified status
+func (h *Handler) promoteThreadEmail(w http.ResponseWriter, r *http.Request) {
+	emailID := chi.URLParam(r, "id")
+	if emailID == "" {
+		http.Error(w, "invalid email id", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Status        string `json:"status"`
+		ApplicationID int64  `json:"application_id"`
+		ThreadID      string `json:"thread_id"` // used only for tagging sibling emails
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Record correction: this email was not initially classified correctly, but should have been
+	emailSubject, emailBody, emailDate, err := h.store.GetThreadEmailSubjectBodyDate(r.Context(), emailID)
+	if err != nil {
+		http.Error(w, "failed to load email metadata", http.StatusInternalServerError)
+		return
+	}
+	if emailDate.IsZero() {
+		emailDate = time.Now()
+	}
+	_ = h.store.AddCorrection(r.Context(), emailID, emailSubject, emailBody, "conversation", req.Status)
+
+	// Create a new application stage using the original email date
+	stageID, err := h.store.CreateStage(r.Context(), req.ApplicationID, domain.Status(req.Status), emailID, false, emailDate)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Link the thread email to this new stage
+	if err := h.store.LinkThreadEmailToStage(r.Context(), emailID, stageID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Tag all emails in the same thread with this application so journey includes them
+	if req.ThreadID != "" {
+		_ = h.store.TagThreadEmailsForApplication(r.Context(), req.ThreadID, req.ApplicationID)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, map[string]int64{"stage_id": stageID})
+}
+
+func (h *Handler) addCorrectionRule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Rule string `json:"rule"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Rule == "" {
+		http.Error(w, "rule text required", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.AddCorrectionRule(r.Context(), req.Rule); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, map[string]string{"status": "created"})
+}
+
+func (h *Handler) markReviewed(w http.ResponseWriter, r *http.Request) {
+	stageID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.MarkStageReviewed(r.Context(), stageID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) getJourney(w http.ResponseWriter, r *http.Request) {
+	applicationID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if h.sync != nil {
+		if err := h.sync.BackfillThreads(r.Context(), applicationID); err != nil {
+			log.Printf("thread backfill app %d: %v", applicationID, err)
+		}
+	}
+	groups, err := h.store.GetJourney(r.Context(), applicationID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, groups)
+}
+
+func parseID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -110,54 +321,4 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-
-	var body struct {
-		Status string `json:"status"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	app, err := h.store.GetApplication(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	newStatus := domain.Status(body.Status)
-	if err := h.store.AddCorrection(r.Context(),
-		app.LastEmailID, "", app.EmailBody,
-		app.Status, newStatus); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := h.store.UpdateStatus(r.Context(), id, newStatus, app.LastEmailID, app.EmailBody); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, map[string]string{"status": "updated"})
-}
-
-func (h *Handler) markReviewed(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if err := h.store.MarkReviewed(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
 }
