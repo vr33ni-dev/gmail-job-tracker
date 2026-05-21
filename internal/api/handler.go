@@ -11,14 +11,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
-	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 	llmClient "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
 	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
 )
 
 type Handler struct {
-	store *db.Store
+	store appStore
 	sync  *syncsvc.Service
 	llm   *llmClient.Client
 }
@@ -102,7 +101,7 @@ func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() {
-		if err := h.sync.Run(context.Background()); err != nil {
+		if err := h.sync.SyncAll(context.Background()); err != nil {
 			log.Printf("sync error: %v", err)
 		}
 	}()

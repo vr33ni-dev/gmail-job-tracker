@@ -34,7 +34,7 @@ func NewRouter(ctx context.Context, store *db.Store, cfg *oauth2.Config, userEma
 			return
 		}
 		h.sync = syncSvc.NewService(store, gmailClient, llm, email, name)
-		go h.sync.RunLoop(ctx, 15*time.Minute)
+		go h.sync.SyncLoop(ctx, 15*time.Minute)
 		if t, err := store.LastPollTime(ctx); err == nil {
 			log.Printf("gmail sync started (running every 15 min) - last sync on: %s", t.Format("2006-01-02 15:04"))
 		} else {

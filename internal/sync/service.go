@@ -35,7 +35,7 @@ func NewService(store *db.Store, g *gmail.Client, c *llm.Client, userEmail, user
 	}
 }
 
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) SyncAll(ctx context.Context) error {
 	since, err := s.store.LastPollTime(ctx)
 	outputLabel := os.Getenv("OUTPUT_LABEL")
 
@@ -710,7 +710,7 @@ func (s *Service) SyncCompany(ctx context.Context, company string) error {
 	return nil
 }
 
-func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
+func (s *Service) SyncLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -718,7 +718,7 @@ func (s *Service) RunLoop(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.Run(ctx); err != nil {
+			if err := s.SyncAll(ctx); err != nil {
 				log.Printf("sync error: %v", err)
 			}
 		}

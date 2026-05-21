@@ -25,6 +25,7 @@ var legalSuffixes = []string{
 	" corporation", " corp.", " corp",
 	" limited", " ltd.", " ltd",
 	" incorporated", " inc.", " inc",
+	" llc", " l.l.c.",
 	" b.v.", " bv",
 	" s.a.", " sa",
 	" s.r.l.", " srl",
