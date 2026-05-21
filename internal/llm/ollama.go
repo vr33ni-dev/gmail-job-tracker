@@ -8,11 +8,57 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 )
 
 // ── Ollama ───────────────────────────────────────────────────────────────────
+func (c *Client) suggestRuleWithOllama(ctx context.Context, userMsg string) (string, error) {
+	model := os.Getenv("OLLAMA_MODEL")
+	if model == "" {
+		model = "llama3.1:8b"
+	}
+	type msg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []msg{
+			{Role: "system", Content: suggestRuleSystemPrompt},
+			{Role: "user", Content: userMsg},
+		},
+		"max_tokens": 60,
+		"stream":     false,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ollamaAPIURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama %d: %s", resp.StatusCode, b)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil || len(out.Choices) == 0 {
+		return "", fmt.Errorf("ollama empty response")
+	}
+	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+}
+
 func (c *Client) parseWithOllama(ctx context.Context, prompt, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {

@@ -7,3 +7,4 @@ docs/*
 backup.sql
 .claude/
 internal/db/corrections_backup.sql
+.envrc

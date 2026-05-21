@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -54,6 +55,7 @@ Status rules:
   ✗ NOT INTERVIEW: "Baran is on vacation, we are finding another team member" (no commitment yet)
   ✗ NOT INTERVIEW: "AI notetaker tool will be used" — still a regular interview, NOT ai_interview
   ✗ NOT INTERVIEW: Zoom/calendar meeting notifications ("is inviting you to a scheduled Zoom meeting", "Join Zoom Meeting", meeting ID and passcode only) — these are calendar confirmations, set is_duplicate true
+  ✗ NOT INTERVIEW: Gmail reaction notifications ("reacted via Gmail", "reacted to your message") — these are emoji reactions to emails, set is_duplicate true
   ✗ NOT INTERVIEW: Short conversational replies mid-process ("Yes, depends how many months", "Sure, let me check", "Thanks for the update") — set confidence "low" instead
   ✗ NOT INTERVIEW: Upwork job invitations ("invited to submit a proposal", "submit a proposal to work with") — classify as applied
 - offer: job offer received
@@ -80,7 +82,8 @@ IMPORTANT RULES:
 - If role cannot be determined, use "" (empty string) — do not guess
 - Set confidence "low" if: newsletter, marketing/promotional, product announcement, or unrelated to a job application (contains "Newsletter", "nur solange der Vorrat reicht", "Abmelden", or is about products/sales)
 - Set confidence "high" if: email clearly relates to a specific job application with identifiable company and status
-- Set confidence "medium" if: email relates to a job application but company or status is ambiguous`
+- Set confidence "medium" if: email relates to a job application but company or status is ambiguous
+- applied, offer, rejected, and withdrawn can each occur ONLY ONCE per application. If you receive a second email of any of these types (e.g. a reminder about a rejection, a follow-up on an offer, a second confirmation of withdrawal), set is_duplicate: true`
 
 func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (*domain.ParsedEmail, error) {
 	// build prompt with corrections injected
@@ -96,6 +99,7 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 					examples = append(examples, cor)
 				}
 			}
+			log.Printf("llm: injecting %d rule(s), %d example(s) into prompt", len(rules), len(examples))
 			if len(rules) > 0 || len(examples) > 0 {
 				prompt += "\n\nPrevious corrections and rules (apply these):\n"
 			}
@@ -133,6 +137,24 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 		return c.parseWithClaude(ctx, prompt, subject, body, from, existingContext)
 	default:
 		return c.parseWithOllama(ctx, prompt, subject, body, from, existingContext)
+	}
+}
+
+const suggestRuleSystemPrompt = `You write correction rules for an email classifier. Given an email that was incorrectly classified, write ONE short rule (max 15 words, imperative, no quotes) that generalises this correction to prevent similar mistakes. Output only the rule text, nothing else.
+Examples:
+- Gmail reaction notifications ('reacted via Gmail') are conversations, not interview stages
+- Emails from noreply@lever.co with subject 'application received' are applied, not interview`
+
+func (c *Client) SuggestRule(ctx context.Context, subject, body, wrongStatus, correctStatus string) (string, error) {
+	userMsg := fmt.Sprintf(
+		"Email subject: %s\nEmail body (first 400 chars): %s\nWrong classification: %s\nCorrect classification: %s\nWrite the rule:",
+		subject, truncate(body, 400), wrongStatus, correctStatus,
+	)
+	switch c.provider {
+	case "claude":
+		return c.suggestRuleWithClaude(ctx, userMsg)
+	default:
+		return c.suggestRuleWithOllama(ctx, userMsg)
 	}
 }
 

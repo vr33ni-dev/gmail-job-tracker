@@ -5,11 +5,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/vr33ni-dev/gmail-job-tracker/internal/utils"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
@@ -64,8 +64,17 @@ func NewClient(ctx context.Context, token *oauth2.Token, config *oauth2.Config) 
 	return &Client{svc: svc}, nil
 }
 
+// GetUserEmail returns the authenticated account's email address via the Gmail profile API.
+func (c *Client) GetUserEmail(ctx context.Context) (string, error) {
+	profile, err := c.svc.Users.GetProfile("me").Context(ctx).Do()
+	if err != nil {
+		return "", err
+	}
+	return profile.EmailAddress, nil
+}
+
 func (c *Client) FetchJobEmails(ctx context.Context, since time.Time) ([]Email, error) {
-	inClause := utils.InClause()
+	inClause := os.Getenv("IN_CLAUSE")
 
 	query := fmt.Sprintf(
 		`in%s after:%s (subject:"application" OR subject:"applied" OR subject:"process update" OR subject:"applying" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"meeting" OR subject:"next step" OR subject:"next steps" OR subject:"thank you for applying" OR subject:"thanks for applying" OR subject:"your application" OR subject:"assignment" OR subject:"task" OR subject:"challenge" OR subject:"assessment" OR subject:"case study" OR subject:"test" OR subject:"Aufgabe" OR subject:"Hausaufgabe" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung" OR subject:"leider" OR subject:"Vorstellungsgespräch" OR subject:"Deine Bewerbung" OR subject:"Ihre Bewerbung" OR filename:invite.ics OR filename:invitation.ics OR "meet.google.com" OR "zoom.us" OR "calendly.com" OR "cal.com" OR "greenhouse.io/schedule")`,
@@ -98,10 +107,13 @@ func (c *Client) FetchJobEmails(ctx context.Context, since time.Time) ([]Email, 
 
 func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, since time.Time) ([]Email, error) {
 	keywords := `(subject:"application" OR subject:"applied" OR subject:"process update" OR subject:"applying" OR subject:"interview" OR subject:"offer" OR subject:"unfortunately" OR subject:"regret" OR subject:"meeting" OR subject:"next step" OR subject:"next steps" OR subject:"thank you for applying" OR subject:"thanks for applying" OR subject:"your application" OR subject:"assignment" OR subject:"task" OR subject:"challenge" OR subject:"assessment" OR subject:"case study" OR subject:"test" OR subject:"Aufgabe" OR subject:"Hausaufgabe" OR subject:"Bewerbung" OR subject:"Absage" OR subject:"Einladung" OR filename:invite.ics OR filename:invitation.ics OR "meet.google.com" OR "zoom.us" OR "calendly.com" OR "cal.com" OR "greenhouse.io/schedule" OR "schedule.lever.co" OR "lever.co/schedule")`
-	// in:anywhere ensures archived/labeled emails (e.g. moved to a Jobs label by a Gmail filter)
-	// are included — without it, Gmail may exclude emails that have been removed from All Mail view
+	inClause := os.Getenv("IN_CLAUSE")
+	if inClause == "" {
+		inClause = ":anywhere"
+	}
 	query := fmt.Sprintf(
-		`in:anywhere after:%s "%s" %s`,
+		`in%s after:%s "%s" %s`,
+		inClause,
 		since.Format("2006/01/02"),
 		company,
 		keywords,

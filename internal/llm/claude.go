@@ -15,6 +15,45 @@ import (
 )
 
 // ── Claude ───────────────────────────────────────────────────────────────────
+func (c *Client) suggestRuleWithClaude(ctx context.Context, userMsg string) (string, error) {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	type msg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"model":      "claude-haiku-4-5-20251001",
+		"max_tokens": 60,
+		"system":     suggestRuleSystemPrompt,
+		"messages":   []msg{{Role: "user", Content: userMsg}},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeAPIURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("claude %d: %s", resp.StatusCode, b)
+	}
+	var out struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil || len(out.Content) == 0 {
+		return "", fmt.Errorf("claude empty response")
+	}
+	return strings.TrimSpace(out.Content[0].Text), nil
+}
+
 func (c *Client) parseWithClaude(ctx context.Context, prompt, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 

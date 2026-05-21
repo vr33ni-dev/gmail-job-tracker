@@ -1,6 +1,21 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrDuplicateStage is returned when trying to add a singleton stage that already exists.
+var ErrDuplicateStage = errors.New("stage of this type already exists for this application")
+
+// IsSingletonStage returns true for stage types that may only appear once per application.
+func IsSingletonStage(s Status) bool {
+	switch s {
+	case StatusApplied, StatusOffer, StatusRejected, StatusWithdrawn:
+		return true
+	}
+	return false
+}
 
 type Status string
 

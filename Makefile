@@ -30,6 +30,9 @@ withdraw:
 db-seed:
 	$(DB) < internal/db/seeds.sql
 
+db-seed-demo:
+	$(DB) < internal/db/seeds_demo.sql
+
 db-corrections-restore:
 	$(DB) < internal/db/corrections_backup.sql
 
@@ -52,6 +55,9 @@ db-reset-company:
 	    JOIN applications a ON a.id = s.application_id\
 	    WHERE LOWER(a.company) = LOWER('$(company)') AND s.last_email_id != ''\
 	  );\
+	  DELETE FROM thread_emails WHERE application_id IN (\
+	    SELECT id FROM applications WHERE LOWER(company) = LOWER('$(company)')\
+	  );\
 	  DELETE FROM applications WHERE LOWER(company) = LOWER('$(company)');\
 	"
 	@echo "$(company) cleared — trigger a company sync from the UI to re-process"
@@ -70,3 +76,6 @@ test:
 	go tool cover -func=coverage.out
 
 lint-test: lint test
+
+run:
+	go run cmd/server/main.go

@@ -23,8 +23,8 @@ func NewRouter(ctx context.Context, store *db.Store, cfg *oauth2.Config, userEma
 	r.Use(middleware.Logger, middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	h := &Handler{store: store}
 	llm := llmClient.NewClient(store)
+	h := &Handler{store: store, llm: llm}
 
 	startSync := func(email, name string) {
 		token, _ := auth.LoadToken()
@@ -87,5 +87,6 @@ func NewRouter(ctx context.Context, store *db.Store, cfg *oauth2.Config, userEma
 	r.Get("/api/applications/{id}/journey", h.getJourney)
 	r.Post("/api/thread-emails/{id}/promote", h.promoteThreadEmail)
 	r.Post("/api/corrections/rule", h.addCorrectionRule)
+	r.Post("/api/applications/{id}/suggest-rule", h.suggestRule)
 	return r
 }

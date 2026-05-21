@@ -16,7 +16,7 @@ import (
 
 func main() {
 	envFile := ".env"
-	if os.Getenv("DEMO") == "true" {
+	if os.Getenv("IS_DEMO") == "true" {
 		envFile = ".env.demo"
 	}
 	_ = godotenv.Load(envFile)

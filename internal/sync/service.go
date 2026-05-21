@@ -2,8 +2,10 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -13,7 +15,6 @@ import (
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/gmail"
 	llm "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
-	"github.com/vr33ni-dev/gmail-job-tracker/internal/utils"
 )
 
 type Service struct {
@@ -36,7 +37,7 @@ func NewService(store *db.Store, g *gmail.Client, c *llm.Client, userEmail, user
 
 func (s *Service) Run(ctx context.Context) error {
 	since, err := s.store.LastPollTime(ctx)
-	outputLabel := utils.OutputLabel()
+	outputLabel := os.Getenv("OUTPUT_LABEL")
 
 	if err != nil {
 		since = time.Now().Add(-120 * 24 * time.Hour)
@@ -126,6 +127,22 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 		return err
 	}
 
+	s.selfHealApps(ctx, apps)
+
+	if err := s.store.FixEmptyRoles(ctx); err != nil {
+		log.Printf("self-heal: fix roles error: %v", err)
+	}
+	if err := s.store.FixAllAppliedStageDates(ctx); err != nil {
+		log.Printf("self-heal: fix applied dates error: %v", err)
+	}
+
+	log.Printf("self-healing complete")
+	return nil
+}
+
+// selfHealApps runs applied-stage backfill and scheduling email recovery for
+// a given set of apps. Called by SelfHeal (all apps) and SyncCompany (one company).
+func (s *Service) selfHealApps(ctx context.Context, apps []domain.Application) {
 	for _, app := range apps {
 		hasApplied := false
 		earliest := time.Now()
@@ -168,19 +185,9 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 		}
 	}
 
-	if err := s.store.FixEmptyRoles(ctx); err != nil {
-		log.Printf("self-heal: fix roles error: %v", err)
-	}
-	if err := s.store.FixAllAppliedStageDates(ctx); err != nil {
-		log.Printf("self-heal: fix applied dates error: %v", err)
-	}
-
 	if err := s.selfHealSchedulingEmails(ctx, apps); err != nil {
 		log.Printf("self-heal: scheduling emails error: %v", err)
 	}
-
-	log.Printf("self-healing complete")
-	return nil
 }
 
 // selfHealSchedulingEmails finds Cal.com/Calendly invites that were missed because
@@ -201,7 +208,7 @@ func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Ap
 		if !hasInterview {
 			continue
 		}
-		fromAddrs, err := s.store.GetContactFromAddrsForApp(ctx, app.ID)
+		fromAddrs, err := s.store.GetContactFromAddrsForApp(ctx, app.ID, s.getUserEmail())
 		if err != nil || len(fromAddrs) == 0 {
 			continue
 		}
@@ -366,8 +373,6 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		}
 		if firstWord != "" && !strings.Contains(ctxLower, firstWord) {
 			override := senderDisplayName(email.From)
-			log.Printf("hallucination guard: %q first word %q not in context — replacing with %q for %s",
-				parsed.Company, firstWord, override, email.ID)
 			parsed.Company = override
 		} else {
 			for _, sep := range []string{" – ", " - "} {
@@ -384,8 +389,6 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 					}
 				}
 				if !suffixInCtx {
-					log.Printf("hallucination guard: stripped suffix from %q → %q for %s",
-						parsed.Company, parsed.Company[:idx], email.ID)
 					parsed.Company = parsed.Company[:idx]
 				}
 				break
@@ -575,6 +578,10 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 
 	stageID, err := s.store.CreateStage(ctx, appID, parsed.Status, email.ID, false, appliedAt)
 	if err != nil {
+		if errors.Is(err, domain.ErrDuplicateStage) {
+			log.Printf("skipping duplicate %s stage for %s/%s: %s", parsed.Status, company, role, email.ID)
+			return s.store.MarkEmailProcessed(ctx, email.ID)
+		}
 		return err
 	}
 	if parsed.Status == domain.StatusApplied {
@@ -612,15 +619,34 @@ func isReminder(body string) bool {
 		strings.Contains(lower, "this event isn't in your calendar")
 }
 
+// getUserEmail returns the cached user email, fetching it from the Gmail profile
+// API on first call if it wasn't populated at startup.
+func (s *Service) getUserEmail() string {
+	if s.userEmail != "" {
+		return s.userEmail
+	}
+	if email, err := s.gmail.GetUserEmail(context.Background()); err == nil {
+		s.userEmail = email
+	}
+	return s.userEmail
+}
+
 func (s *Service) isSentByUser(from string) bool {
-	from = strings.ToLower(from)
-	if s.userEmail != "" && strings.Contains(from, strings.ToLower(s.userEmail)) {
+	fromLower := strings.ToLower(from)
+	userEmail := s.getUserEmail()
+	if userEmail != "" && strings.Contains(fromLower, strings.ToLower(userEmail)) {
 		return true
 	}
-	if s.userName != "" && strings.Contains(from, strings.ToLower(s.userName)) {
+	if s.userName == "" {
+		return false
+	}
+	userNameLower := strings.ToLower(s.userName)
+	if strings.Contains(fromLower, userNameLower) {
 		return true
 	}
-	return false
+	// extracted display name is a part of the user's name (e.g. "Verena" matches "Verena Lechner")
+	display := strings.ToLower(extractDisplayName(from))
+	return display != "" && strings.Contains(userNameLower, display)
 }
 
 var invalidCompanyNames = map[string]bool{
@@ -669,8 +695,17 @@ func (s *Service) SyncCompany(ctx context.Context, company string) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	log.Printf("company sync complete for %q", company)
-	if err := s.SelfHeal(ctx); err != nil {
-		log.Printf("company sync self-heal error: %v", err)
+
+	// self-heal only for this company's apps, not all applications
+	allApps, err := s.store.ListApplications(ctx)
+	if err == nil {
+		var companyApps []domain.Application
+		for _, app := range allApps {
+			if strings.EqualFold(domain.NormalizeCompany(app.Company), domain.NormalizeCompany(company)) {
+				companyApps = append(companyApps, app)
+			}
+		}
+		s.selfHealApps(ctx, companyApps)
 	}
 	return nil
 }

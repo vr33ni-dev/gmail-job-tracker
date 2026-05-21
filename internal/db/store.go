@@ -63,7 +63,20 @@ func (s *Store) FindApplicationById(ctx context.Context, id int64) (*domain.Appl
 }
 
 // CreateStage inserts a new application_stages row and returns the stage ID.
+// Returns domain.ErrDuplicateStage if the status is a singleton and one already exists.
 func (s *Store) CreateStage(ctx context.Context, applicationID int64, status domain.Status, lastEmailID string, needsReview bool, appliedAt time.Time) (int64, error) {
+	if domain.IsSingletonStage(status) {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM application_stages WHERE application_id=$1 AND status=$2)`,
+			applicationID, status,
+		).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if exists {
+			return 0, domain.ErrDuplicateStage
+		}
+	}
 	var id int64
 	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO application_stages (application_id, status, last_email_id, needs_review, applied_at)
@@ -432,20 +445,25 @@ func (s *Store) HasSchedulingEmailForApp(ctx context.Context, appID int64) (bool
 	return exists, err
 }
 
-// GetContactFromAddrsForApp returns distinct from_addr values for non-scheduling
-// senders in the application's thread emails — used to find related scheduling
-// emails by contact name.
-func (s *Store) GetContactFromAddrsForApp(ctx context.Context, appID int64) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT from_addr FROM thread_emails
+// GetContactFromAddrsForApp returns distinct from_addr values for non-scheduling,
+// non-user senders in the application's thread emails — used to find related
+// scheduling emails by contact name. userEmail is excluded so the user's own
+// sent addresses are never used as search terms.
+func (s *Store) GetContactFromAddrsForApp(ctx context.Context, appID int64, userEmail string) ([]string, error) {
+	query := `SELECT DISTINCT from_addr FROM thread_emails
 		 WHERE application_id = $1
 		 AND from_addr NOT ILIKE '%cal.com%'
 		 AND from_addr NOT ILIKE '%calendly.com%'
 		 AND from_addr NOT ILIKE '%noreply%'
-		 AND from_addr NOT ILIKE '%no-reply%'
-		 LIMIT 5`,
-		appID,
-	)
+		 AND from_addr NOT ILIKE '%no-reply%'`
+	args := []any{appID}
+	if userEmail != "" {
+		query += ` AND from_addr NOT ILIKE $2`
+		args = append(args, "%"+userEmail+"%")
+	}
+	query += ` LIMIT 5`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

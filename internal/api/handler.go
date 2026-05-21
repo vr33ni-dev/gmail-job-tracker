@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,12 +13,14 @@ import (
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
+	llmClient "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
 	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
 )
 
 type Handler struct {
 	store *db.Store
 	sync  *syncsvc.Service
+	llm   *llmClient.Client
 }
 
 func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +85,10 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	stageID, err := h.store.CreateStage(r.Context(), appID, domain.Status(req.Status), "", false, time.Now())
 	if err != nil {
+		if errors.Is(err, domain.ErrDuplicateStage) {
+			http.Error(w, "a stage of this type already exists for this application", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -234,6 +241,10 @@ func (h *Handler) promoteThreadEmail(w http.ResponseWriter, r *http.Request) {
 	// Create a new application stage using the original email date
 	stageID, err := h.store.CreateStage(r.Context(), req.ApplicationID, domain.Status(req.Status), emailID, false, emailDate)
 	if err != nil {
+		if errors.Is(err, domain.ErrDuplicateStage) {
+			http.Error(w, "a stage of this type already exists for this application", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -267,6 +278,37 @@ func (h *Handler) addCorrectionRule(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, map[string]string{"status": "created"})
+}
+
+func (h *Handler) suggestRule(w http.ResponseWriter, r *http.Request) {
+	stageID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		WrongStatus   string `json:"wrong_status"`
+		CorrectStatus string `json:"correct_status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stage, err := h.store.GetStageByID(r.Context(), stageID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
+	rule := ""
+	if h.llm != nil {
+		if suggested, llmErr := h.llm.SuggestRule(r.Context(), emailSubject, emailBody, req.WrongStatus, req.CorrectStatus); llmErr == nil {
+			rule = suggested
+		} else {
+			log.Printf("suggestRule LLM error: %v", llmErr)
+		}
+	}
+	writeJSON(w, map[string]string{"rule": rule})
 }
 
 func (h *Handler) markReviewed(w http.ResponseWriter, r *http.Request) {
