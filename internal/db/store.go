@@ -86,7 +86,15 @@ func (s *Store) CreateStage(ctx context.Context, applicationID int64, status dom
 	return id, err
 }
 
+func (s *Store) ListApplicationsByCompany(ctx context.Context, company string) ([]domain.Application, error) {
+	return s.listApplications(ctx, company)
+}
+
 func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
+	return s.listApplications(ctx, "")
+}
+
+func (s *Store) listApplications(ctx context.Context, company string) ([]domain.Application, error) {
 	aliases := make(map[string]string)
 	aliasRows, err := s.db.QueryContext(ctx, `SELECT alias, canonical FROM company_aliases`)
 	if err == nil {
@@ -99,12 +107,18 @@ func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, err
 		}
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 		SELECT a.id, a.company, a.role, a.platform, a.language, a.url, a.applied_at,
 		       s.id, s.status, s.last_email_id, s.needs_review, s.applied_at
 		FROM applications a
-		JOIN application_stages s ON s.application_id = a.id
-		ORDER BY a.company, a.role, s.applied_at ASC`)
+		JOIN application_stages s ON s.application_id = a.id`
+	var args []any
+	if company != "" {
+		query += ` WHERE LOWER(a.company) = LOWER($1)`
+		args = append(args, company)
+	}
+	query += ` ORDER BY a.company, a.role, s.applied_at ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -677,7 +691,7 @@ func (s *Store) FixAppliedStageDate(ctx context.Context, applicationID, appliedS
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE application_stages SET applied_at=$1, updated_at=NOW()
-		WHERE id=$2 AND applied_at > $1`,
+		WHERE id=$2 AND applied_at > $1 AND last_email_id = ''`,
 		earliest.Add(-1*time.Hour), appliedStageID)
 	return err
 }
@@ -695,7 +709,8 @@ func (s *Store) FixAllAppliedStageDates(ctx context.Context) error {
 		) AS earliest
 		WHERE ap.application_id = earliest.application_id
 		AND ap.status = 'applied'
-		AND ap.applied_at > earliest.min_interview`); err != nil {
+		AND ap.applied_at > earliest.min_interview
+		AND ap.last_email_id = ''`); err != nil {
 		return err
 	}
 	// Sync applications.applied_at to match the earliest stage date.

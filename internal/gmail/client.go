@@ -118,7 +118,7 @@ func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, s
 		company,
 		keywords,
 	)
-	log.Printf("company sync query: %s", query)
+	log.Printf("FetchJobEmailsForCompany() - query: %s", query)
 
 	seen := map[string]bool{}
 	var emails []Email
@@ -135,7 +135,7 @@ func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, s
 			return nil, err
 		}
 
-		log.Printf("company sync: gmail returned %d message ids (page)", len(res.Messages))
+		log.Printf("FetchJobEmailsForCompany() - gmail returned %d message ids (page)", len(res.Messages))
 		for _, m := range res.Messages {
 			if seen[m.Id] {
 				continue
@@ -143,7 +143,7 @@ func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, s
 			seen[m.Id] = true
 			email, err := c.fetchMessage(ctx, m.Id)
 			if err != nil {
-				log.Printf("company sync: failed to fetch message %s: %v", m.Id, err)
+				log.Printf("FetchJobEmailsForCompany() - failed to fetch message %s: %v", m.Id, err)
 				continue
 			}
 			emails = append(emails, *email)

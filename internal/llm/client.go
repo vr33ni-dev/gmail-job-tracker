@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -44,6 +43,7 @@ The email may be in English or German. Apply the same status rules regardless of
 
 Status rules:
 - applied: any confirmation of receipt OR generic acknowledgment — "Thank you for applying", "We'll review your application", "Bewerbung erhalten", "Eingang Ihrer Bewerbung", "Your profile is under review", waitlisted, platform nudges, no specific next step
+  ✗ NOT APPLIED: Any email asking the candidate to provide a missing document ("please share your resume", "I forgot to ask for your CV", "send us your portfolio", "could you send over your resume") — these are mid-process follow-ups from a real person; set confidence: "low" and is_duplicate: true
 - ai_interview: automated/AI-conducted interview request. Examples: "AI interview", "automated interview", "HireVue", "Spark Hire", "micro1", "one-way video interview", "complete your AI interview"
 - interview: ANY personalized outreach where a human has reviewed your profile and wants to move forward — scheduling language, video conference links, take-home assignments, written interview requests, calendar invites
   ✓ INTERVIEW: "Are you available on 19.03.2026 14:00? Join: https://meet.google.com/xxx"
@@ -99,7 +99,6 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 					examples = append(examples, cor)
 				}
 			}
-			log.Printf("llm: injecting %d rule(s), %d example(s) into prompt", len(rules), len(examples))
 			if len(rules) > 0 || len(examples) > 0 {
 				prompt += "\n\nPrevious corrections and rules (apply these):\n"
 			}

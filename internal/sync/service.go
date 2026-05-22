@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -44,57 +43,60 @@ func (s *Service) SyncAll(ctx context.Context) error {
 	}
 	// roll back 7 days to catch emails missed by previous syncs (safe — processed_emails prevents double-processing)
 	since = since.Add(-7 * 24 * time.Hour)
-	log.Printf("polling gmail since %s", since.Format(time.DateOnly))
+	log.Printf("SyncAll(): polling gmail since %s", since.Format(time.DateOnly))
+	if corrections, err := s.store.GetRecentCorrections(ctx, 20); err == nil {
+		log.Printf("llm: %d correction(s) active", len(corrections))
+	}
 
 	emails, err := s.gmail.FetchJobEmails(ctx, since)
 	if err != nil {
-		log.Printf("fetch emails error: %v", err)
+		log.Printf("SyncAll(): fetch emails error: %v", err)
 		return err
 	}
 
-	log.Printf("fetched %d emails", len(emails))
+	log.Printf("SyncAll(): fetched %d emails", len(emails))
 	sort.Slice(emails, func(i, j int) bool { return emails[i].Date.Before(emails[j].Date) })
 
 	for _, email := range emails {
 		if err := s.processEmail(ctx, email); err != nil {
 			if strings.Contains(err.Error(), "usage limits") {
-				log.Printf("rate limited, stopping sync — will resume on next run")
+				log.Printf("SyncAll(): rate limited, stopping sync — will resume on next run")
 				return nil
 			}
-			log.Printf("error processing %s: %v", email.ID, err)
+			log.Printf("SyncAll(): error processing %s: %v", email.ID, err)
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	log.Printf("sync complete — processed %d emails", len(emails))
+	log.Printf("SyncAll(): sync complete — processed %d emails", len(emails))
 
 	if err := s.SelfHeal(ctx); err != nil {
-		log.Printf("self-heal error: %v", err)
+		log.Printf("SyncAll(): self-heal error: %v", err)
 	}
 
 	// add Jobs label to all known message IDs (reliable — uses exact message IDs)
 	emailIDs, err := s.store.GetAllJobEmailIDs(ctx)
+
 	if err != nil {
-		log.Printf("label move: fetch email IDs: %v", err)
+		log.Printf("SyncAll(): Error fetching emailIDs %v", err)
 	} else if len(emailIDs) > 0 {
 		if err := s.gmail.BatchMoveToLabel(ctx, emailIDs, outputLabel); err != nil {
-			log.Printf("label move: batch label: %v", err)
+			log.Printf("SyncAll(): Error moving messages to label %s: %v", outputLabel, err)
 		} else {
-			log.Printf("label move: labeled %d messages", len(emailIDs))
+			log.Printf("SyncAll(): Batch moved %d messages to label %s", len(emailIDs), outputLabel)
 		}
 	}
 
 	// archive whole threads out of inbox (thread-level, removes INBOX from all messages in conversation)
 	threadIDs, err := s.store.GetAllJobThreadIDs(ctx)
 	if err != nil {
-		log.Printf("label move: fetch thread IDs: %v", err)
+		log.Printf("SyncAll(): Error fetching thread IDs %v", err)
 	} else if len(threadIDs) > 0 {
 		if err := s.gmail.ArchiveThreads(ctx, threadIDs); err != nil {
-			log.Printf("label move: archive threads: %v", err)
+			log.Printf("SyncAll(): Error archiving threads %v", err)
 		} else {
-			log.Printf("label move: archived %d threads", len(threadIDs))
+			log.Printf("SyncAll(): Archived %d threads", len(threadIDs))
 		}
 	}
-
 	return nil
 }
 
@@ -127,7 +129,8 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 		return err
 	}
 
-	s.selfHealApps(ctx, apps)
+	s.selfHealAppliedStages(ctx, apps)
+	s.selfHealSchedulingEmails(ctx, apps)
 
 	if err := s.store.FixEmptyRoles(ctx); err != nil {
 		log.Printf("self-heal: fix roles error: %v", err)
@@ -140,29 +143,19 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 	return nil
 }
 
-// selfHealApps runs applied-stage backfill and scheduling email recovery for
+// selfHealAppliedStages runs applied-stage backfill and scheduling email recovery for
 // a given set of apps. Called by SelfHeal (all apps) and SyncCompany (one company).
-func (s *Service) selfHealApps(ctx context.Context, apps []domain.Application) {
+func (s *Service) selfHealAppliedStages(ctx context.Context, apps []domain.Application) {
 	for _, app := range apps {
-		hasApplied := false
-		earliest := time.Now()
-		for _, stage := range app.Stages {
-			if stage.Status == domain.StatusApplied {
-				hasApplied = true
-				break
-			}
-			if stage.AppliedAt.Before(earliest) {
-				earliest = stage.AppliedAt
-			}
-		}
+		stageInfo := getStageInfo(app.Stages)
 
-		if hasApplied || len(app.Stages) == 0 {
+		if stageInfo.hasApplied || len(app.Stages) == 0 {
 			continue
 		}
 
 		log.Printf("self-heal: %s/%s has no applied stage, searching 1 month back", app.Company, app.Role)
 
-		searchFrom := earliest.Add(-30 * 24 * time.Hour)
+		searchFrom := stageInfo.earliest.Add(-30 * 24 * time.Hour)
 		emails, err := s.gmail.FetchJobEmailsForCompany(ctx, app.Company, searchFrom)
 		if err != nil {
 			log.Printf("self-heal fetch error for %s: %v", app.Company, err)
@@ -175,37 +168,29 @@ func (s *Service) selfHealApps(ctx context.Context, apps []domain.Application) {
 			}
 		}
 
-		if found, err := s.store.HasAppliedStage(ctx, app.ID); err == nil && found {
+		found, err := s.store.HasAppliedStage(ctx, app.ID)
+		if err != nil {
+			log.Printf("self-heal: error checking applied stage for %s: %v", app.Company, err)
+		} else if found {
 			log.Printf("self-heal: found applied for %s", app.Company)
 		} else {
 			log.Printf("self-heal: no applied confirmation email found for %s — creating inferred placeholder", app.Company)
-			if _, err := s.store.CreateStage(ctx, app.ID, domain.StatusApplied, "", true, earliest.Add(-1*time.Hour)); err != nil {
+			if _, err := s.store.CreateStage(ctx, app.ID, domain.StatusApplied, "", true, stageInfo.earliest.Add(-1*time.Hour)); err != nil {
 				log.Printf("self-heal: failed to create placeholder for %s: %v", app.Company, err)
 			}
 		}
-	}
 
-	if err := s.selfHealSchedulingEmails(ctx, apps); err != nil {
-		log.Printf("self-heal: scheduling emails error: %v", err)
 	}
 }
 
 // selfHealSchedulingEmails finds Cal.com/Calendly invites that were missed because
 // they don't mention the company name. For each app with an interview stage but no
 // scheduling service email yet, it searches Gmail by the known contact names.
-func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Application) error {
+func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Application) {
 	for _, app := range apps {
-		hasInterview := false
-		earliest := time.Now()
-		for _, stage := range app.Stages {
-			if stage.Status == domain.StatusInterview || stage.Status == domain.StatusAIInterview {
-				hasInterview = true
-			}
-			if stage.AppliedAt.Before(earliest) {
-				earliest = stage.AppliedAt
-			}
-		}
-		if !hasInterview {
+		stageInfo := getStageInfo(app.Stages)
+
+		if !stageInfo.hasInterview {
 			continue
 		}
 		fromAddrs, err := s.store.GetContactFromAddrsForApp(ctx, app.ID, s.getUserEmail())
@@ -213,44 +198,11 @@ func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Ap
 			continue
 		}
 
-		searchFrom := earliest.Add(-30 * 24 * time.Hour)
+		searchFrom := stageInfo.earliest.Add(-30 * 24 * time.Hour)
 		for _, fromAddr := range fromAddrs {
-			// skip the user's own sent addresses — searching by "Verena" returns hundreds of unrelated emails
-			if s.isSentByUser(fromAddr) {
-				continue
-			}
-			name := extractDisplayName(fromAddr)
-			if name == "" {
-				continue
-			}
-			log.Printf("self-heal scheduling: searching for %q emails for %s/%s", name, app.Company, app.Role)
-			emails, err := s.gmail.FetchJobEmailsForCompany(ctx, name, searchFrom)
-			if err != nil {
-				log.Printf("self-heal scheduling fetch error for %q: %v", name, err)
-				continue
-			}
-			for _, email := range emails {
-				if !isSchedulingService(email.From) {
-					continue
-				}
-				// if the email was previously dropped as noise (in processed_emails but not
-				// in thread_emails), clear it so it can be matched and linked now
-				if processed, _ := s.store.IsEmailProcessed(ctx, email.ID); processed {
-					if linked, _ := s.store.IsEmailInThreadEmails(ctx, email.ID); !linked {
-						log.Printf("self-heal scheduling: un-processing previously-dropped email %s", email.ID)
-						_ = s.store.UnmarkEmailProcessed(ctx, email.ID)
-					} else {
-						continue
-					}
-				}
-				if err := s.processEmail(ctx, email); err != nil {
-					log.Printf("self-heal scheduling process error %s: %v", email.ID, err)
-				}
-				time.Sleep(300 * time.Millisecond)
-			}
+			s.processSchedulingEmailsForContact(ctx, fromAddr, app, searchFrom)
 		}
 	}
-	return nil
 }
 
 func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
@@ -262,28 +214,33 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		return err
 	}
 
+	strippedBody := stripHTML(email.Body)
+
 	// check if this thread is already linked to an application — if so we can store immediately
 	var threadAppID int64
 	if email.ThreadID != "" {
 		threadAppID = s.store.GetThreadApplicationID(ctx, email.ThreadID)
 		if threadAppID != 0 {
-			_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, stripHTML(email.Body), email.Date, threadAppID)
+			_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, strippedBody, email.Date, threadAppID)
 		}
 	}
 
-	// skip emails sent by the user
 	if s.isSentByUser(email.From) {
 		log.Printf("skipping sent email from self: %s thread=%s", email.ID, email.ThreadID)
 		return s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
-	// always skip scheduling service noise (cal.com, calendly, etc.)
 	if isNoise(email.From) {
 		log.Printf("skipping noise email: %s from=%s", email.Subject, email.From)
 		return s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
-	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, stripHTML(email.Body), email.From, nil)
+	if isGmailReaction(email.Subject, strippedBody) {
+		log.Printf("skipping gmail reaction: %s", email.Subject)
+		return s.store.MarkEmailProcessed(ctx, email.ID)
+	}
+
+	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, strippedBody, email.From, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "usage limits") {
 			return err // propagate so the outer loop can stop and leave this email unprocessed
@@ -307,7 +264,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		parsed.Company = extractCompanyFromSubject(email.Subject)
 	}
 
-	// scheduling language in body signals an interview invite even if the URL was stripped
+	// scheduling language in body signals an interview invite even if the LLM missed it
 	if hasSchedulingLanguage(email.Body) && (parsed.Confidence == "low" || parsed.Status == domain.StatusApplied) {
 		log.Printf("overriding to interview — scheduling language detected in %s", email.ID)
 		parsed.Status = domain.StatusInterview
@@ -325,7 +282,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 			if parsed.Company == "" {
 				parsed.Company = extractDomainCompany(email.From)
 				if parsed.Company == "" {
-					parsed.Company = extractCompanyFromBody(email.Body)
+					parsed.Company = extractCompanyFromBody(strippedBody)
 				}
 			}
 		} else {
@@ -476,7 +433,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	}
 
 	if existingApp != nil && threadAppID == 0 && email.ThreadID != "" {
-		_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, stripHTML(email.Body), email.Date, existingApp.ID)
+		_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, strippedBody, email.Date, existingApp.ID)
 		threadAppID = existingApp.ID
 	}
 
@@ -508,7 +465,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 					}
 				}
 				if !allNewer {
-					reparsed, err := s.llm.ParseJobEmail(ctx, email.Subject, stripHTML(email.Body), email.From, existingStages)
+					reparsed, err := s.llm.ParseJobEmail(ctx, email.Subject, strippedBody, email.From, existingStages)
 					if err != nil {
 						if strings.Contains(err.Error(), "usage limits") {
 							return err
@@ -534,7 +491,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 				_ = s.store.LinkThreadEmailToStage(ctx, email.ID, stage.ID)
 				// ensure stored with correct appID if not already
 				if threadAppID == 0 {
-					_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, stripHTML(email.Body), email.Date, stage.ApplicationID)
+					_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, strippedBody, email.Date, stage.ApplicationID)
 				}
 			}
 		}
@@ -557,6 +514,20 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 			log.Printf("skipping duplicate applied email for %s/%s: %s", company, role, email.ID)
 			return s.store.MarkEmailProcessed(ctx, email.ID)
 		}
+		// don't create an applied stage from an email that arrived after an interview already started.
+		// existingApp.Stages is not loaded by FindApplicationByCompanyAndRole, so query directly.
+		if interviewStages, err := s.store.GetStagesByStatus(ctx, existingApp.ID, domain.StatusInterview); err == nil && len(interviewStages) > 0 {
+			earliest := interviewStages[0].AppliedAt
+			for _, st := range interviewStages[1:] {
+				if st.AppliedAt.Before(earliest) {
+					earliest = st.AppliedAt
+				}
+			}
+			if !email.Date.Before(earliest) {
+				log.Printf("skipping late applied email — interview already in progress for %s/%s: %s", company, role, email.ID)
+				return s.store.MarkEmailProcessed(ctx, email.ID)
+			}
+		}
 	}
 
 	appID := threadAppID
@@ -573,7 +544,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 
 	// store thread email now if we haven't yet (first email for a brand-new application)
 	if email.ThreadID != "" && threadAppID == 0 {
-		_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, stripHTML(email.Body), email.Date, appID)
+		_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, strippedBody, email.Date, appID)
 	}
 
 	stageID, err := s.store.CreateStage(ctx, appID, parsed.Status, email.ID, false, appliedAt)
@@ -595,28 +566,6 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	}
 
 	return s.store.MarkEmailProcessed(ctx, email.ID)
-}
-
-func isReminder(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "reminder") ||
-		strings.Contains(lower, "friendly reminder") ||
-		strings.Contains(lower, "last reminder") ||
-		strings.Contains(lower, "don't forget") ||
-		strings.Contains(lower, "still interested") ||
-		strings.Contains(lower, "follow-up on your application") ||
-		strings.Contains(lower, "match score") ||
-		strings.Contains(lower, "assessment report") ||
-		strings.Contains(lower, "talent pool") ||
-		strings.Contains(lower, "thanks again for applying") ||
-		strings.Contains(lower, "i will have a new date") ||
-		strings.Contains(lower, "i'll have a new date") ||
-		strings.Contains(lower, "thanks for filling in this form") ||
-		strings.Contains(lower, "you're receiving this email because you filled in") ||
-		strings.Contains(lower, "upcoming appointment") ||
-		strings.Contains(lower, "you're mentioned in the meeting summary") ||
-		strings.Contains(lower, "meeting summary") ||
-		strings.Contains(lower, "this event isn't in your calendar")
 }
 
 // getUserEmail returns the cached user email, fetching it from the Gmail profile
@@ -649,64 +598,32 @@ func (s *Service) isSentByUser(from string) bool {
 	return display != "" && strings.Contains(userNameLower, display)
 }
 
-var invalidCompanyNames = map[string]bool{
-	"gmail": true, "google": true, "outlook": true, "microsoft": true,
-	"zoom": true, "calendly": true, "cal": true, "slack": true,
-	"linkedin": true, "indeed": true, "glassdoor": true,
-	// job platforms — not companies you apply to
-	"wellfound": true, "angellist": true, "computrabajo": true,
-	"lever": true, "greenhouse": true, "workday": true,
-	"smartrecruiters": true, "recruitee": true, "bamboohr": true,
-}
-
-func isInvalidCompany(company string) bool {
-	return company == "" || invalidCompanyNames[strings.ToLower(company)]
-}
-
-func isNoise(from string) bool {
-	lower := strings.ToLower(from)
-	return strings.Contains(lower, "emailsys1a.net") ||
-		strings.Contains(lower, "calendar-notification@google.com") ||
-		strings.Contains(lower, "calendar-server.bounces.google.com")
-}
-
-func isSchedulingService(from string) bool {
-	lower := strings.ToLower(from)
-	return strings.Contains(lower, "cal.com") ||
-		strings.Contains(lower, "calendly.com") ||
-		strings.Contains(lower, "savvycal.com") ||
-		strings.Contains(lower, "chilipiper.com")
-}
-
 // SyncCompany fetches and processes all job emails for a specific company going back 6 months.
 func (s *Service) SyncCompany(ctx context.Context, company string) error {
 	since := time.Now().Add(-180 * 24 * time.Hour)
-	log.Printf("company sync: fetching emails for %q since %s", company, since.Format(time.DateOnly))
+	log.Printf("SyncCompany(): Polling emails for %q since %s", company, since.Format(time.DateOnly))
 	emails, err := s.gmail.FetchJobEmailsForCompany(ctx, company, since)
 	if err != nil {
 		return fmt.Errorf("fetch emails for %s: %w", company, err)
 	}
-	log.Printf("company sync: fetched %d emails for %q", len(emails), company)
+	log.Printf("SyncCompany(): fetched %d emails for %q", len(emails), company)
 	sort.Slice(emails, func(i, j int) bool { return emails[i].Date.Before(emails[j].Date) })
 	for _, email := range emails {
-		if err := s.processEmail(ctx, email); err != nil {
-			log.Printf("company sync %s: %v", email.ID, err)
+		err = s.processEmail(ctx, email)
+		if err != nil {
+			log.Printf("SyncCompany(): %s: %v", email.ID, err)
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond) //rate-limit Gmail API calls
 	}
-	log.Printf("company sync complete for %q", company)
+	log.Printf("SyncCompany(): complete for %q", company)
 
 	// self-heal only for this company's apps, not all applications
-	allApps, err := s.store.ListApplications(ctx)
+	companyApps, err := s.store.ListApplicationsByCompany(ctx, company)
 	if err == nil {
-		var companyApps []domain.Application
-		for _, app := range allApps {
-			if strings.EqualFold(domain.NormalizeCompany(app.Company), domain.NormalizeCompany(company)) {
-				companyApps = append(companyApps, app)
-			}
-		}
-		s.selfHealApps(ctx, companyApps)
+		s.selfHealAppliedStages(ctx, companyApps)
+		s.selfHealSchedulingEmails(ctx, companyApps)
 	}
+	log.Printf("SyncCompany(): self-healing complete for %q", company)
 	return nil
 }
 
@@ -725,293 +642,42 @@ func (s *Service) SyncLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
-func stripHTML(body string) string {
-	// remove style/script blocks entirely
-	re := regexp.MustCompile(`(?is)<(style|script)[^>]*>.*?</(style|script)>`)
-	body = re.ReplaceAllString(body, "")
-	// remove links but keep their text: <a href="...">text</a> → text
-	re = regexp.MustCompile(`(?i)<a[^>]*href=[^>]*>(.*?)</a>`)
-	body = re.ReplaceAllString(body, "$1")
-	// remove bare URLs
-	re = regexp.MustCompile(`https?://\S+`)
-	body = re.ReplaceAllString(body, "")
-	// replace block elements with newlines
-	re = regexp.MustCompile(`(?i)<(br|p|div|tr|li)[^>]*>`)
-	body = re.ReplaceAllString(body, "\n")
-	// remove all remaining tags
-	re = regexp.MustCompile(`<[^>]+>`)
-	body = re.ReplaceAllString(body, "")
-	// decode common HTML entities
-	body = strings.ReplaceAll(body, "&amp;", "&")
-	body = strings.ReplaceAll(body, "&lt;", "<")
-	body = strings.ReplaceAll(body, "&gt;", ">")
-	body = strings.ReplaceAll(body, "&nbsp;", " ")
-	body = strings.ReplaceAll(body, "&#8203;", "")
-	body = strings.ReplaceAll(body, "&quot;", "\"")
-	// collapse multiple blank lines
-	re = regexp.MustCompile(`\n{3,}`)
-	body = re.ReplaceAllString(body, "\n\n")
-	return strings.TrimSpace(body)
+func (s *Service) processSchedulingEmailsForContact(ctx context.Context, fromAddr string, app domain.Application, searchFrom time.Time) {
+	// skip the user's own sent addresses
+	if s.isSentByUser(fromAddr) {
+		return
+	}
+	name := extractDisplayName(fromAddr)
+	if name == "" {
+		return
+	}
+	log.Printf("self-heal scheduling: searching for %q emails for %s/%s", name, app.Company, app.Role)
+	emails, err := s.gmail.FetchJobEmailsForCompany(ctx, name, searchFrom)
+	if err != nil {
+		log.Printf("self-heal scheduling fetch error for %q: %v", name, err)
+		return
+	}
+	for _, email := range emails {
+		if err := s.processSchedulingEmail(ctx, email); err != nil {
+			log.Printf("self-heal scheduling process error %s: %v", email.ID, err)
+		}
+	}
 }
 
-// if email contains a meet/zoom/calendar link, force interview classification
-func hasInterviewLink(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "meet.google.com") ||
-		strings.Contains(lower, "zoom.us") ||
-		strings.Contains(lower, "teams.microsoft.com") ||
-		strings.Contains(lower, "calendly.com") ||
-		strings.Contains(lower, "cal.com/") ||
-		strings.Contains(lower, "schedule.lever.co")
-}
-
-func isCalendarNotification(body string) bool {
-	// truncate to avoid matching quoted text from a previous calendar notification
-	// embedded in a reply — only the new content at the top matters
-	if len(body) > 500 {
-		body = body[:500]
+func (s *Service) processSchedulingEmail(ctx context.Context, email gmail.Email) error {
+	if !isSchedulingService(email.From) {
+		return nil // not relevant, skip silently
 	}
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "this is a reminder about your upcoming event") ||
-		strings.Contains(lower, "reminder about your upcoming") ||
-		strings.Contains(lower, "is inviting you to a scheduled zoom meeting") ||
-		strings.Contains(lower, "you're confirmed for your interview") ||
-		strings.Contains(lower, "you are confirmed for your interview") ||
-		strings.Contains(lower, "confirmed for the following interview") ||
-		strings.Contains(lower, "your interview has been confirmed") ||
-		strings.Contains(lower, "your interview is confirmed") ||
-		strings.Contains(lower, "interview confirmation") && strings.Contains(lower, "date/time:") ||
-		strings.Contains(lower, "appointment booked") ||
-		strings.Contains(lower, "microsoft teams meeting") ||
-		// Google Calendar booking confirmation boilerplate
-		strings.Contains(lower, "test your setup at any time before your appointment") ||
-		strings.Contains(lower, "new to google meet? learn more about getting started")
-}
 
-func hasSchedulingLanguage(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "choose the most convenient slot") ||
-		strings.Contains(lower, "choose a convenient slot") ||
-		strings.Contains(lower, "choose the most convenient time") ||
-		strings.Contains(lower, "book your slot") ||
-		strings.Contains(lower, "book a slot") ||
-		strings.Contains(lower, "select a time slot") ||
-		strings.Contains(lower, "pick a time slot") ||
-		strings.Contains(lower, "schedule your interview") ||
-		strings.Contains(lower, "book your interview") ||
-		strings.Contains(lower, "book an interview appointment") ||
-		strings.Contains(lower, "schedule a call") ||
-		strings.Contains(lower, "wählen sie einen termin") ||
-		strings.Contains(lower, "termin wählen") ||
-		strings.Contains(lower, "greenhouse.io/schedule") ||
-		strings.Contains(lower, "upcoming interview")
-}
-
-var schedulingDomains = map[string]bool{
-	"cal":        true,
-	"calendly":   true,
-	"zoom":       true,
-	"teams":      true,
-	"meet":       true,
-	"greenhouse": true,
-	"lever":      true,
-}
-
-// senderDisplayName extracts the display name from a From header (e.g.
-// "Acto <acto-jobs@m.personio.com>" → "Acto"), returning "" for individual
-// person names and known non-company senders.
-// extractDisplayName pulls the display name from a From header including person
-// names — unlike senderDisplayName, it does not filter out two-word person names.
-func extractDisplayName(from string) string {
-	re := regexp.MustCompile(`^"?([^"<]+?)"?\s*<`)
-	m := re.FindStringSubmatch(strings.TrimSpace(from))
-	if len(m) < 2 {
-		return ""
-	}
-	name := strings.TrimSpace(m[1])
-	lower := strings.ToLower(name)
-	for _, skip := range []string{"noreply", "no-reply", "google", "calendly", "zoom", "microsoft", "linkedin", "upwork"} {
-		if strings.Contains(lower, skip) {
-			return ""
-		}
-	}
-	return name
-}
-
-func senderDisplayName(from string) string {
-	re := regexp.MustCompile(`^"?([^"<]+?)"?\s*<`)
-	m := re.FindStringSubmatch(strings.TrimSpace(from))
-	if len(m) < 2 {
-		return ""
-	}
-	name := strings.TrimSpace(m[1])
-	lower := strings.ToLower(name)
-	for _, skip := range []string{"noreply", "no-reply", "google", "tl;dv", "calendly", "zoom", "microsoft", "linkedin", "upwork"} {
-		if strings.Contains(lower, skip) {
-			return ""
-		}
-	}
-	// two-word name where both words start with a capital → likely a person
-	parts := strings.Fields(name)
-	if len(parts) == 2 && len(parts[0]) > 0 && len(parts[1]) > 0 &&
-		parts[0][0] >= 'A' && parts[0][0] <= 'Z' &&
-		parts[1][0] >= 'A' && parts[1][0] <= 'Z' {
-		return ""
-	}
-	return name
-}
-
-func extractDomainCompany(from string) string {
-	re := regexp.MustCompile(`@([^.>]+)`)
-	matches := re.FindStringSubmatch(strings.ToLower(from))
-	if len(matches) > 1 {
-		domain := matches[1]
-		if schedulingDomains[domain] {
-			return ""
-		}
-		return domain
-	}
-	return ""
-}
-
-// extractNamesFromSchedulingEmail pulls proper names from scheduling email
-// subjects and bodies, filtering out the user's own name. Handles patterns like:
-func extractNamesFromSchedulingEmail(subject, body, myName string) []string {
-	myLower := strings.ToLower(myName)
-	seen := map[string]bool{}
-	var names []string
-
-	add := func(name string) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return
-		}
-		if myLower != "" && strings.Contains(strings.ToLower(name), myLower) {
-			return
-		}
-		if !seen[name] {
-			seen[name] = true
-			names = append(names, name)
+	if processed, _ := s.store.IsEmailProcessed(ctx, email.ID); processed {
+		if linked, _ := s.store.IsEmailInThreadEmails(ctx, email.ID); !linked {
+			log.Printf("self-heal scheduling: un-processing previously-dropped email %s", email.ID)
+			_ = s.store.UnmarkEmailProcessed(ctx, email.ID)
+		} else {
+			return nil // already linked, skip
 		}
 	}
 
-	// subject: "between X and Y" or "meeting/interview/call with X"
-	betweenRe := regexp.MustCompile(`(?i)between ([A-Z][a-z]+(?:\s[A-Z][a-z]+)+) and ([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)`)
-	withRe := regexp.MustCompile(`(?i)(?:meeting|interview|call) with ([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)`)
-	if m := betweenRe.FindStringSubmatch(subject); m != nil {
-		add(m[1])
-		add(m[2])
-	} else if m := withRe.FindStringSubmatch(subject); m != nil {
-		add(m[1])
-	}
-
-	// body: "Name - Organizer" / "Name - Host" (booking confirmation format)
-	organizerRe := regexp.MustCompile(`([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\s*[-–]\s*(?:Organizer|Host)`)
-	for _, m := range organizerRe.FindAllStringSubmatch(body, -1) {
-		add(m[1])
-	}
-
-	// body: "You & Name" (reminder format)
-	youAndRe := regexp.MustCompile(`You & ([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)`)
-	for _, m := range youAndRe.FindAllStringSubmatch(body, -1) {
-		add(m[1])
-	}
-
-	emailRe := regexp.MustCompile(`([\w]+(?:\.[\w]+)+)@([\w.-]+\.[a-z]{2,})`)
-	skipEmailDomains := map[string]bool{
-		"cal.com": true, "calendly.com": true, "gmail.com": true,
-		"google.com": true, "zoom.us": true, "microsoft.com": true,
-	}
-	myEmailLower := ""
-	if myName != "" {
-		myEmailLower = strings.ToLower(strings.ReplaceAll(myName, " ", "."))
-	}
-	for _, m := range emailRe.FindAllStringSubmatch(strings.ToLower(body), -1) {
-		if len(m) < 3 || skipEmailDomains[m[2]] {
-			continue
-		}
-		localPart := m[1]
-		if myEmailLower != "" && strings.Contains(localPart, myEmailLower) {
-			continue
-		}
-		parts := strings.Split(localPart, ".")
-		if len(parts) < 2 {
-			continue
-		}
-		var titleParts []string
-		for _, p := range parts {
-			if len(p) > 1 {
-				titleParts = append(titleParts, strings.ToUpper(p[:1])+p[1:])
-			}
-		}
-		if len(titleParts) >= 2 {
-			add(strings.Join(titleParts, " "))
-		}
-	}
-
-	return names
-}
-
-func extractCompanyFromBody(body string) string {
-	// look for email addresses in body and extract non-scheduling domains
-	re := regexp.MustCompile(`[\w.]+@([\w.-]+\.\w+)`)
-	matches := re.FindAllStringSubmatch(strings.ToLower(body), -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			domain := m[1]
-			// skip common non-company domains
-			skip := []string{"gmail.com", "cal.com", "google.com", "zoom.us", "microsoft.com", "calendly.com"}
-			isSkip := false
-			for _, s := range skip {
-				if strings.Contains(domain, s) {
-					isSkip = true
-					break
-				}
-			}
-			if !isSkip {
-				// return just the company part e.g. "pelo.tech" -> "pelo"
-				parts := strings.Split(domain, ".")
-				if len(parts) > 0 {
-					return parts[0]
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func extractCompanyFromSubject(subject string) string {
-	lower := strings.ToLower(subject)
-	for _, prefix := range []string{" at ", " bei ", " @ "} {
-		idx := strings.LastIndex(lower, prefix)
-		if idx == -1 {
-			continue
-		}
-		candidate := strings.TrimSpace(subject[idx+len(prefix):])
-		candidate = strings.TrimRight(candidate, ".,!?;:")
-		if candidate != "" && len(candidate) <= 60 {
-			return candidate
-		}
-	}
-	return ""
-}
-
-func hasRejectionKeywords(body string) bool {
-	lower := strings.ToLower(body)
-	keywords := []string{
-		"leider", "nicht berücksichtigen", "haben uns für andere kandidaten",
-		"unfortunately", "decided to move forward with other candidates",
-		"decided to move forward with candidates", "we won't be moving forward",
-		"we will not be moving forward", "not be progressing",
-		"not progressing your application", "we are unable to move forward",
-		"does not meet our current requirements", "more closely align with",
-		"more closely matches", "we've filled the position",
-		"decided not to move forward", "we have decided not",
-	}
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
+	time.Sleep(300 * time.Millisecond)
+	return s.processEmail(ctx, email) // return whatever error processEmail gives
 }
