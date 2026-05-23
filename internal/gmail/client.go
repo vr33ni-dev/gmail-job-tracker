@@ -2,11 +2,9 @@ package gmail
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -26,36 +24,6 @@ type Email struct {
 
 type Client struct{ svc *gmail.Service }
 
-var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
-var whitespaceRegex = regexp.MustCompile(`\s+`)
-var hrefRegex = regexp.MustCompile(`(?i)href="(https?://[^"]+)"`)
-
-func stripHTML(s string) string {
-	s = htmlTagRegex.ReplaceAllString(s, " ")
-	s = whitespaceRegex.ReplaceAllString(s, " ")
-	return strings.TrimSpace(s)
-}
-
-// extractHTMLLinks pulls href URLs out of HTML regardless of which MIME part
-// is used as the body — so scheduling links in anchor tags are never lost.
-func extractHTMLLinks(part *gmail.MessagePart) []string {
-	if part == nil {
-		return nil
-	}
-	var links []string
-	if part.MimeType == "text/html" && part.Body != nil && part.Body.Data != "" {
-		if data, err := base64.URLEncoding.DecodeString(part.Body.Data); err == nil {
-			for _, m := range hrefRegex.FindAllStringSubmatch(string(data), -1) {
-				links = append(links, m[1])
-			}
-		}
-	}
-	for _, p := range part.Parts {
-		links = append(links, extractHTMLLinks(p)...)
-	}
-	return links
-}
-
 func NewClient(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*Client, error) {
 	svc, err := gmail.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
 	if err != nil {
@@ -64,7 +32,6 @@ func NewClient(ctx context.Context, token *oauth2.Token, config *oauth2.Config) 
 	return &Client{svc: svc}, nil
 }
 
-// GetUserEmail returns the authenticated account's email address via the Gmail profile API.
 func (c *Client) GetUserEmail(ctx context.Context) (string, error) {
 	profile, err := c.svc.Users.GetProfile("me").Context(ctx).Do()
 	if err != nil {
@@ -118,7 +85,6 @@ func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, s
 		company,
 		keywords,
 	)
-	log.Printf("FetchJobEmailsForCompany() - query: %s", query)
 
 	seen := map[string]bool{}
 	var emails []Email
@@ -135,7 +101,6 @@ func (c *Client) FetchJobEmailsForCompany(ctx context.Context, company string, s
 			return nil, err
 		}
 
-		log.Printf("FetchJobEmailsForCompany() - gmail returned %d message ids (page)", len(res.Messages))
 		for _, m := range res.Messages {
 			if seen[m.Id] {
 				continue
@@ -174,7 +139,7 @@ func (c *Client) fetchMessage(ctx context.Context, id string) (*Email, error) {
 			email.Date = parseEmailDate(h.Value)
 		}
 	}
-	email.Body = stripHTML(extractBody(msg.Payload))
+	email.Body = stripHTMLAndWhitespace(extractBody(msg.Payload))
 	for _, link := range extractHTMLLinks(msg.Payload) {
 		if !strings.Contains(email.Body, link) {
 			email.Body += " " + link
@@ -183,57 +148,7 @@ func (c *Client) fetchMessage(ctx context.Context, id string) (*Email, error) {
 	return email, nil
 }
 
-func extractBody(part *gmail.MessagePart) string {
-	if part == nil {
-		return ""
-	}
-
-	// prefer plain text
-	if part.MimeType == "text/plain" && part.Body != nil && part.Body.Data != "" {
-		if data, err := base64.URLEncoding.DecodeString(part.Body.Data); err == nil {
-			return strings.TrimSpace(string(data))
-		}
-	}
-
-	// recurse into multipart
-	for _, p := range part.Parts {
-		if body := extractBody(p); body != "" {
-			return body
-		}
-	}
-
-	// fall back to HTML and strip tags
-	if part.MimeType == "text/html" && part.Body != nil && part.Body.Data != "" {
-		if data, err := base64.URLEncoding.DecodeString(part.Body.Data); err == nil {
-			return stripHTML(strings.TrimSpace(string(data)))
-		}
-	}
-
-	return ""
-}
-
-func parseEmailDate(dateStr string) time.Time {
-	formats := []string{
-		time.RFC1123Z, // Mon, 02 Jan 2006 15:04:05 -0700
-		time.RFC1123,  // Mon, 02 Jan 2006 15:04:05 MST
-		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)",
-		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
-		"Mon, 2 Jan 2006 15:04:05 -0700", // single digit day, no parens
-		"Mon, 2 Jan 2006 15:04:05 MST",
-		"02 Jan 2006 15:04:05 -0700",
-		"2 Jan 2006 15:04:05 -0700",
-	}
-	for _, f := range formats {
-		if t, err := time.Parse(f, dateStr); err == nil {
-			return t
-		}
-	}
-	log.Printf("unparseable date: %q", dateStr)
-	return time.Time{}
-}
-
 func (c *Client) MoveToLabel(ctx context.Context, messageID, labelName string) error {
-	// get or create label
 	labelID, err := c.getOrCreateLabel(ctx, labelName)
 	if err != nil {
 		return err
@@ -252,7 +167,6 @@ func (c *Client) getOrCreateLabel(ctx context.Context, name string) (string, err
 		return "", err
 	}
 	for _, l := range labels.Labels {
-		// log.Printf("gmail label: %q id=%s", l.Name, l.Id)
 		if strings.EqualFold(l.Name, name) {
 			return l.Id, nil
 		}
@@ -285,7 +199,6 @@ func (c *Client) BatchMoveToLabel(ctx context.Context, messageIDs []string, labe
 	}).Context(ctx).Do()
 }
 
-// FetchThreadIDsForMessages returns the thread ID for each given message ID.
 func (c *Client) FetchThreadIDsForMessages(ctx context.Context, messageIDs []string) ([]string, error) {
 	seen := make(map[string]struct{})
 	var threadIDs []string
@@ -303,7 +216,6 @@ func (c *Client) FetchThreadIDsForMessages(ctx context.Context, messageIDs []str
 	return threadIDs, nil
 }
 
-// ArchiveThreads removes INBOX from each thread, archiving whole conversations.
 func (c *Client) ArchiveThreads(ctx context.Context, threadIDs []string) error {
 	ok, failed := 0, 0
 	for _, tid := range threadIDs {
@@ -322,7 +234,6 @@ func (c *Client) ArchiveThreads(ctx context.Context, threadIDs []string) error {
 	return nil
 }
 
-// FetchThreadEmails returns all messages in a Gmail thread.
 func (c *Client) FetchThreadEmails(ctx context.Context, threadID string) ([]Email, error) {
 	thread, err := c.svc.Users.Threads.Get("me", threadID).Format("full").Context(ctx).Do()
 	if err != nil {
@@ -341,7 +252,7 @@ func (c *Client) FetchThreadEmails(ctx context.Context, threadID string) ([]Emai
 				email.Date = parseEmailDate(h.Value)
 			}
 		}
-		email.Body = stripHTML(extractBody(msg.Payload))
+		email.Body = stripHTMLAndWhitespace(extractBody(msg.Payload))
 		emails = append(emails, email)
 	}
 	return emails, nil

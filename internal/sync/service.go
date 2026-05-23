@@ -206,7 +206,6 @@ func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Ap
 }
 
 func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
-	log.Printf("processing email %s: subject=%q from=%q", email.ID, email.Subject, email.From)
 	if processed, err := s.store.IsEmailProcessed(ctx, email.ID); err != nil || processed {
 		if processed {
 			log.Printf("skipping already-processed email %s", email.ID)
