@@ -57,23 +57,39 @@ func (s *Service) SyncAll(ctx context.Context) error {
 	log.Printf("SyncAll(): fetched %d emails", len(emails))
 	sort.Slice(emails, func(i, j int) bool { return emails[i].Date.Before(emails[j].Date) })
 
+	affectedCompanies := map[string]bool{}
 	for _, email := range emails {
-		if err := s.processEmail(ctx, email); err != nil {
+		company, err := s.processEmail(ctx, email)
+		if err != nil {
 			if strings.Contains(err.Error(), "usage limits") {
 				log.Printf("SyncAll(): rate limited, stopping sync — will resume on next run")
 				return nil
 			}
 			log.Printf("SyncAll(): error processing %s: %v", email.ID, err)
 		}
-		time.Sleep(300 * time.Millisecond)
+		if company != "" {
+			affectedCompanies[company] = true
+		}
 	}
 	log.Printf("SyncAll(): sync complete — processed %d emails", len(emails))
 
-	if err := s.SelfHeal(ctx); err != nil {
-		log.Printf("SyncAll(): self-heal error: %v", err)
+	if len(affectedCompanies) > 0 {
+		companies := make([]string, 0, len(affectedCompanies))
+		for company := range affectedCompanies {
+			companies = append(companies, company)
+		}
+		if err := s.SelfHealForCompanies(ctx, companies); err != nil {
+			log.Printf("SyncAll(): self-heal error: %v", err)
+		}
+		// label + archive only when something changed
+		s.labelAndArchive(ctx, outputLabel)
 	}
 
-	// add Jobs label to all known message IDs (reliable — uses exact message IDs)
+	return nil
+}
+
+func (s *Service) labelAndArchive(ctx context.Context, outputLabel string) {
+	// add label to all known message IDs (reliable — uses exact message IDs)
 	emailIDs, err := s.store.GetAllJobEmailIDs(ctx)
 
 	if err != nil {
@@ -97,7 +113,6 @@ func (s *Service) SyncAll(ctx context.Context) error {
 			log.Printf("SyncAll(): Archived %d threads", len(threadIDs))
 		}
 	}
-	return nil
 }
 
 // BackfillThreads fetches all messages from Gmail for each thread belonging to
@@ -118,6 +133,30 @@ func (s *Service) BackfillThreads(ctx context.Context, applicationID int64) erro
 			_ = s.store.StoreThreadEmail(ctx, email.ID, email.ThreadID, email.From, email.Subject, stripHTML(email.Body), email.Date, applicationID)
 		}
 	}
+	return nil
+}
+
+func (s *Service) SelfHealForCompanies(ctx context.Context, companies []string) error {
+	allApps, err := s.store.ListApplications(ctx)
+	if err != nil {
+		return fmt.Errorf("self-heal for companies %v: failed to list applications: %w", companies, err)
+	}
+
+	var apps []domain.Application
+	for _, app := range allApps {
+		for _, company := range companies {
+			if strings.EqualFold(domain.NormalizeCompany(app.Company), domain.NormalizeCompany(company)) {
+				apps = append(apps, app)
+				break
+			}
+		}
+	}
+
+	s.selfHealAppliedStages(ctx, apps)
+	s.selfHealSchedulingEmails(ctx, apps)
+	log.Printf("self-heal: complete for %v", companies)
+
+	// no data quality fixes here — save those for full heal
 	return nil
 }
 
@@ -163,7 +202,8 @@ func (s *Service) selfHealAppliedStages(ctx context.Context, apps []domain.Appli
 		}
 
 		for _, email := range emails {
-			if err := s.processEmail(ctx, email); err != nil {
+			_, err := s.processEmail(ctx, email)
+			if err != nil {
 				log.Printf("self-heal process error %s: %v", email.ID, err)
 			}
 		}
@@ -205,12 +245,12 @@ func (s *Service) selfHealSchedulingEmails(ctx context.Context, apps []domain.Ap
 	}
 }
 
-func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
+func (s *Service) processEmail(ctx context.Context, email gmail.Email) (string, error) {
 	if processed, err := s.store.IsEmailProcessed(ctx, email.ID); err != nil || processed {
 		if processed {
 			log.Printf("skipping already-processed email %s", email.ID)
 		}
-		return err
+		return "", err
 	}
 
 	strippedBody := stripHTML(email.Body)
@@ -226,26 +266,26 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 
 	if s.isSentByUser(email.From) {
 		log.Printf("skipping sent email from self: %s thread=%s", email.ID, email.ThreadID)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	if isNoise(email.From) {
 		log.Printf("skipping noise email: %s from=%s", email.Subject, email.From)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	if isGmailReaction(email.Subject, strippedBody) {
 		log.Printf("skipping gmail reaction: %s", email.Subject)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	parsed, err := s.llm.ParseJobEmail(ctx, email.Subject, strippedBody, email.From, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "usage limits") {
-			return err // propagate so the outer loop can stop and leave this email unprocessed
+			return "", err // propagate so the outer loop can stop and leave this email unprocessed
 		}
 		log.Printf("skipping email %s: %v", email.ID, err)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	log.Printf("parsed email %s: company=%s role=%s status=%s confidence=%s",
@@ -307,7 +347,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 				}
 			}
 			log.Printf("skipping low confidence email %s", email.ID)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
+			return "", s.store.MarkEmailProcessed(ctx, email.ID)
 		}
 	}
 
@@ -371,7 +411,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		}
 		if isInvalidCompany(parsed.Company) {
 			log.Printf("skipping email %s: invalid company name %q", email.ID, parsed.Company)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
+			return "", s.store.MarkEmailProcessed(ctx, email.ID)
 		}
 	}
 
@@ -439,12 +479,12 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	// calendar notifications and reminders: email is now stored, but no stage should be created.
 	if isCalendarNotification(email.Body) {
 		log.Printf("skipping calendar notification (stored): %s thread=%s", email.Subject, email.ThreadID)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 	if isReminder(email.Body) && !hasInterviewLink(email.Body) &&
 		parsed.Status != domain.StatusRejected && parsed.Status != domain.StatusOffer {
 		log.Printf("skipping reminder (stored): %s", email.Subject)
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	// for interview/ai_interview: re-parse with existing stages as context
@@ -467,12 +507,12 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 					reparsed, err := s.llm.ParseJobEmail(ctx, email.Subject, strippedBody, email.From, existingStages)
 					if err != nil {
 						if strings.Contains(err.Error(), "usage limits") {
-							return err
+							return "", err
 						}
 						log.Printf("warning: duplicate-check parse failed for %s: %v", email.ID, err)
 					} else if reparsed.IsDuplicate {
 						log.Printf("skipping duplicate %s email for %s/%s: %s", parsed.Status, company, role, email.ID)
-						return s.store.MarkEmailProcessed(ctx, email.ID)
+						return "", s.store.MarkEmailProcessed(ctx, email.ID)
 					}
 				}
 			}
@@ -482,7 +522,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	// idempotency — email already created a stage; link the thread email to it
 	exists, err := s.store.ApplicationExistsByEmailID(ctx, email.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if exists {
 		if email.ThreadID != "" {
@@ -494,7 +534,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 				}
 			}
 		}
-		return s.store.MarkEmailProcessed(ctx, email.ID)
+		return "", s.store.MarkEmailProcessed(ctx, email.ID)
 	}
 
 	appliedAt := email.Date
@@ -507,11 +547,11 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	if parsed.Status == domain.StatusApplied && existingApp != nil {
 		hasApplied, err := s.store.HasAppliedStage(ctx, existingApp.ID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if hasApplied {
 			log.Printf("skipping duplicate applied email for %s/%s: %s", company, role, email.ID)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
+			return "", s.store.MarkEmailProcessed(ctx, email.ID)
 		}
 		// don't create an applied stage from an email that arrived after an interview already started.
 		// existingApp.Stages is not loaded by FindApplicationByCompanyAndRole, so query directly.
@@ -524,7 +564,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 			}
 			if !email.Date.Before(earliest) {
 				log.Printf("skipping late applied email — interview already in progress for %s/%s: %s", company, role, email.ID)
-				return s.store.MarkEmailProcessed(ctx, email.ID)
+				return "", s.store.MarkEmailProcessed(ctx, email.ID)
 			}
 		}
 	}
@@ -537,7 +577,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		var err error
 		appID, err = s.store.FindOrCreateApplication(ctx, company, role, parsed.Platform, parsed.Language, "", appliedAt)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 
@@ -550,9 +590,9 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 	if err != nil {
 		if errors.Is(err, domain.ErrDuplicateStage) {
 			log.Printf("skipping duplicate %s stage for %s/%s: %s", parsed.Status, company, role, email.ID)
-			return s.store.MarkEmailProcessed(ctx, email.ID)
+			return "", s.store.MarkEmailProcessed(ctx, email.ID)
 		}
-		return err
+		return "", err
 	}
 	if parsed.Status == domain.StatusApplied {
 		if err := s.store.FixAppliedStageDate(ctx, appID, stageID); err != nil {
@@ -564,7 +604,7 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) error {
 		_ = s.store.LinkThreadEmailToStage(ctx, email.ID, stageID)
 	}
 
-	return s.store.MarkEmailProcessed(ctx, email.ID)
+	return company, s.store.MarkEmailProcessed(ctx, email.ID)
 }
 
 // getUserEmail returns the cached user email, fetching it from the Gmail profile
@@ -608,7 +648,7 @@ func (s *Service) SyncCompany(ctx context.Context, company string) error {
 	log.Printf("SyncCompany(): fetched %d emails for %q", len(emails), company)
 	sort.Slice(emails, func(i, j int) bool { return emails[i].Date.Before(emails[j].Date) })
 	for _, email := range emails {
-		err = s.processEmail(ctx, email)
+		_, err = s.processEmail(ctx, email)
 		if err != nil {
 			log.Printf("SyncCompany(): %s: %v", email.ID, err)
 		}
@@ -617,10 +657,8 @@ func (s *Service) SyncCompany(ctx context.Context, company string) error {
 	log.Printf("SyncCompany(): complete for %q", company)
 
 	// self-heal only for this company's apps, not all applications
-	companyApps, err := s.store.ListApplicationsByCompany(ctx, company)
-	if err == nil {
-		s.selfHealAppliedStages(ctx, companyApps)
-		s.selfHealSchedulingEmails(ctx, companyApps)
+	if err := s.SelfHealForCompanies(ctx, []string{company}); err != nil {
+		log.Printf("company sync: self-heal error: %v", err)
 	}
 	log.Printf("SyncCompany(): self-healing complete for %q", company)
 	return nil
@@ -678,5 +716,6 @@ func (s *Service) processSchedulingEmail(ctx context.Context, email gmail.Email)
 	}
 
 	time.Sleep(300 * time.Millisecond)
-	return s.processEmail(ctx, email) // return whatever error processEmail gives
+	_, err := s.processEmail(ctx, email)
+	return err
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
@@ -86,7 +85,6 @@ IMPORTANT RULES:
 - applied, offer, rejected, and withdrawn can each occur ONLY ONCE per application. If you receive a second email of any of these types (e.g. a reminder about a rejection, a follow-up on an offer, a second confirmation of withdrawal), set is_duplicate: true`
 
 func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (*domain.ParsedEmail, error) {
-	// build prompt with corrections injected
 	prompt := systemPrompt
 	if c.store != nil {
 		if corrections, err := c.store.GetRecentCorrections(ctx, 20); err == nil && len(corrections) > 0 {
@@ -155,30 +153,4 @@ func (c *Client) SuggestRule(ctx context.Context, subject, body, wrongStatus, co
 	default:
 		return c.suggestRuleWithOllama(ctx, userMsg)
 	}
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-func cleanJSON(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
-	// extract just the JSON object
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start != -1 && end != -1 && end > start {
-		s = s[start : end+1]
-	}
-	// fix common Llama JSON issues — missing quote before key after comma
-	s = strings.ReplaceAll(s, ",.", ",\"")
-	s = strings.ReplaceAll(s, ", .", ", \"")
-	return s
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "...[truncated]"
 }

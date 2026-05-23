@@ -78,4 +78,4 @@ test:
 lint-test: lint test
 
 run:
-	go run cmd/server/main.go
+	go run ./cmd/server/

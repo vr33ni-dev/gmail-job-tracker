@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
+	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 	llmClient "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
 	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
@@ -20,6 +21,14 @@ type Handler struct {
 	store appStore
 	sync  *syncsvc.Service
 	llm   *llmClient.Client
+}
+
+func NewHandler(store *db.Store, llm *llmClient.Client) *Handler {
+	return &Handler{store: store, llm: llm}
+}
+
+func (h *Handler) SetSync(svc *syncsvc.Service) {
+	h.sync = svc
 }
 
 func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +115,19 @@ func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, map[string]string{"status": "sync triggered"})
+}
+
+func (h *Handler) triggerSelfHeal(w http.ResponseWriter, r *http.Request) {
+	if h.sync == nil {
+		http.Error(w, `{"error":"gmail not connected"}`, http.StatusServiceUnavailable)
+		return
+	}
+	go func() {
+		if err := h.sync.SelfHeal(context.Background()); err != nil {
+			log.Printf("manual self-heal error: %v", err)
+		}
+	}()
+	writeJSON(w, map[string]string{"status": "self-heal triggered"})
 }
 
 func (h *Handler) syncCompany(w http.ResponseWriter, r *http.Request) {
