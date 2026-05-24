@@ -6,5 +6,6 @@ docs/*
 .vscode/settings.json
 backup.sql
 .claude/
+memory/
 internal/db/corrections_backup.sql
 .envrc

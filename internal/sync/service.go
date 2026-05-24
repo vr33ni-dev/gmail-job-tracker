@@ -334,6 +334,16 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) (string, 
 		}
 	}
 
+	// a scheduling/meeting platform link in an applied email is a misclassification — it's an interview invite
+	if hasInterviewLink(email.Body) && parsed.Status == domain.StatusApplied {
+		log.Printf("overriding applied to interview — scheduling link detected in %s", email.ID)
+		parsed.Status = domain.StatusInterview
+		parsed.Confidence = "medium"
+		if parsed.Company == "" {
+			parsed.Company = extractDomainCompany(email.From)
+		}
+	}
+
 	if parsed.Confidence == "low" {
 		if hasInterviewLink(email.Body) {
 			log.Printf("overriding low confidence — interview link detected in %s", email.ID)

@@ -50,8 +50,8 @@ Status rules:
   ✓ INTERVIEW: "The next step is a take-home assignment" (human moving you forward)
   ✓ INTERVIEW: "The next step is to answer a few questions" or "we'd like you to complete a short task" (written assessment — counts as interview even without a meeting link)
   ✓ INTERVIEW: "I enjoyed our conversation, we'd like to move forward" (human follow-up)
+  ✓ INTERVIEW: "Thank you for sharing your Resume. we're moving forward to the next step. You can schedule a time that works best for you using this link" — opening thanks does NOT make it applied; the scheduling invite is the dominant signal
   ✗ NOT INTERVIEW: "I will have a new date for you by EOD tomorrow" (no commitment yet)
-  ✗ NOT INTERVIEW: "Baran is on vacation, we are finding another team member" (no commitment yet)
   ✗ NOT INTERVIEW: "AI notetaker tool will be used" — still a regular interview, NOT ai_interview
   ✗ NOT INTERVIEW: Zoom/calendar meeting notifications ("is inviting you to a scheduled Zoom meeting", "Join Zoom Meeting", meeting ID and passcode only) — these are calendar confirmations, set is_duplicate true
   ✗ NOT INTERVIEW: Gmail reaction notifications ("reacted via Gmail", "reacted to your message") — these are emoji reactions to emails, set is_duplicate true
@@ -126,7 +126,7 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 			existingContext += fmt.Sprintf("%d. Date: %s | Email ID: %s\n",
 				i+1, s.AppliedAt.Format("2006-01-02 15:04"), s.LastEmailID)
 		}
-		existingContext += "\nAn interview stage is already recorded for this company. Default to is_duplicate: true (same interview conversation) UNLESS this email clearly announces a brand-new distinct event: explicit 'second interview', 'next round', 'technical interview', 'final round', 'coding challenge', new take-home assignment, a new specific future date/time being proposed in this email that differs from the stage dates listed above, or explicit progression language ('you passed', 'next step', 'I'd like to move you forward'). The interviewer being the same person does NOT make it a duplicate — a new date alone is enough. The following are always is_duplicate: true: calendar notifications ('your event is scheduled', 'you have an appointment'), scheduling replies, reminders, 'thank you for the interview' follow-ups, short conversational replies, and any email that does not itself invite you to something new."
+		existingContext += "\nAn interview stage is already recorded for this company. Default to is_duplicate: true (same interview conversation) UNLESS this email clearly announces a brand-new distinct event: explicit 'second interview', 'next round', 'technical interview', 'final round', 'coding challenge', new take-home assignment, written assessment or questionnaire ('answer a few questions', 'we'd like you to answer', 'complete the following questions', 'share your thoughts on'), a new specific future date/time being proposed in this email that differs from the stage dates listed above, or explicit progression language ('you passed', 'next step', 'I'd like to move you forward'). Example: 'the next step in our process is for you to answer a few questions' is is_duplicate: false — it is a new written assessment stage, not a repeat of the previous interview. The interviewer being the same person does NOT make it a duplicate — a new date alone is enough. The following are always is_duplicate: true: calendar notifications ('your event is scheduled', 'you have an appointment'), scheduling replies, reminders, 'thank you for the interview' follow-ups, short conversational replies, and any email that does not itself invite you to something new."
 	}
 
 	switch c.provider {
