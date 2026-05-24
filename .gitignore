@@ -2,6 +2,7 @@
 .env.demo
 token.json
 seeds.sql
+seeds_demo.sql
 docs/*
 .vscode/settings.json
 backup.sql

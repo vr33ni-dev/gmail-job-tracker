@@ -1,10 +1,10 @@
 # Gmail Job Tracker
 
-Automatically syncs your Gmail inbox and uses Claude AI to detect and track job applications.
+Automatically syncs a Gmail inbox and uses an LLM to detect and track job applications.
 
 ## What it does
 
-- Connects to your Gmail account via OAuth
+- Connects to Gmail account via OAuth
 - Scans emails for job application signals (confirmations, rejections, interviews, etc.)
 - Stores and tracks applications in a PostgreSQL database
 - Exposes a REST API to query your application history
@@ -16,15 +16,13 @@ Automatically syncs your Gmail inbox and uses Claude AI to detect and track job 
 - **React + TypeScript** frontend
 - **Gmail API** for email access
 - **LLM classification** — supports Claude (Anthropic), Ollama (local, default)
-- **Docker** for local PostgreSQL
 
 ## Prerequisites
 
 - Go 1.22+
-- Docker (for PostgreSQL)
 - A Google Cloud project with the Gmail API enabled
 - One of:
-  - [Ollama](https://ollama.com) (free, local) — recommended
+  - [Ollama](https://ollama.com) (free, local)
   - An Anthropic API key (Claude)
 
 ## LLM Setup
@@ -48,7 +46,7 @@ OLLAMA_MODEL=llama3.1:8b
 
 ### Claude (Anthropic)
 
-Better accuracy, costs ~$0.01 per full sync. Recommended for initial bulk sync.
+Better accuracy, limited usage. Recommended for initial bulk sync.
 
 ```bash
 LLM_PROVIDER=claude
@@ -78,22 +76,31 @@ cp .env.example .env
 | `GOOGLE_CLIENT_ID`     | Google OAuth client ID       |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret   |
 | `PORT`                 | HTTP port (default: 8080)    |
+| `LLM_PROVIDER`         | claude OR ollama             |
+| `OLLAMA_MODEL`         | llama3.1:8b                  |
+| `IS_DEMO`              | demonstration mode           |
+| `IN_CLAUSE`            | defaults to ':anywhere'      |
+| `OUTPUT_LABEL`         | e.g. 'jobs'                  |
 
 1. Run database migrations:
 
 ```bash
-go run cmd/server/main.go migrate
-# Apply db seed
+go run cmd/server/main.go 
+OR
+make run
+# Reset db
 make db-reset / make db-truncate # keep corrections, useful for re-syncs
-go run cmd/server/main.go  # wait for "migrations applied"
+## restart server # wait for "migrations applied"
 # Ctrl+C
-make db-seed
+# Apply DB seed
+make db-seed / db-seed-demo
 ```
 
 1. Start the server:
 
 ```bash
-go run cmd/server/main.go
+go run cmd/server/main.go 
+make run
 ```
 
 ## Google OAuth setup
@@ -104,22 +111,6 @@ go run cmd/server/main.go
 4. Download the credentials and add the client ID and secret to your `.env`
 
 On first run, you'll be prompted to authorize access — this generates a `token.json` file (never commit this).
-
-## Configuration
-
-### User Settings
-
-The `settings` table stores personal configuration. Update after setup:
-
-```bash
-make db-set-user
-```
-
-| Key | Description | Example |
-|-----|-------------|---------|
-| `user_email` | Your Gmail address — used to detect sent emails | `you@gmail.com` |
-| `user_name` | Your last name — used to filter out emails you sent | `smith` |
-| `last_poll_time` | Controls how far back Gmail is polled on first sync | `2026-01-01` |
 
 ### Company Aliases
 
@@ -146,46 +137,17 @@ Common cases:
 Personal aliases go in `seeds.sql` (git-ignored) so they survive resets:
 
 ```bash
-make db-seed
+make db-seed OR make db-seed-demo
 ```
 
 ### Personal Seed File
 
 `seeds.sql` is git-ignored and contains your personal configuration:
 
-- User email and name (emails sent from this address are filtered out during sync. Without this, your own replies (questions to recruiters, withdrawal emails) would be processed as incoming job emails and potentially misclassified)
 - Company aliases specific to your applications
 
 After every `make db-reset`, run `make db-seed` to restore your config. Or use `make db-fresh` which does both.
 
 ## TODO
 
-### Multi-step reasoning (optional)
-
-Currently classification happens in a single LLM prompt. A two-step approach would improve accuracy:
-
-- Step 1: "Is this a job application email?" → Yes/No filter
-- Step 2: Full classification prompt only for confirmed job emails
-
-This reduces false positives (newsletters, unrelated emails slipping through) at the cost of 2x API calls.
-
-Configurable via settings table:
-
-```sql
-UPDATE settings SET value='true' WHERE key='multi_step_reasoning';
-```
-
-When enabled, Step 1 acts as a pre-filter before the main classification prompt.
-Only relevant for bulk syncs — day-to-day volume (2-5 emails) makes this unnecessary.
-
-### Entity extraction improvement
-
-Currently company name and role are extracted by the LLM in a single pass alongside status classification. This can be unreliable when:
-
-- Company name in body differs from sender domain
-- Role varies between emails for the same position
-- ATS platforms (Lever, Greenhouse) obscure the actual company
-
-Planned improvement:
-
-- Extract sender domain as a reliable company identifier fall
+Follow my Github Issues to stay tunes for future improvements.
