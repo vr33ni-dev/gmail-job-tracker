@@ -40,28 +40,7 @@ func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request) {
-	filter := domain.ApplicationFilter{
-		Company: r.URL.Query().Get("company"),
-		SortBy:  r.URL.Query().Get("sort_by"),
-		SortDir: r.URL.Query().Get("sort_dir"),
-	}
-	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
-		tmp, err := time.Parse("2006-01-02", fromStr)
-		if err != nil {
-			http.Error(w, "invalid from date", http.StatusBadRequest)
-			return
-		}
-		filter.From = tmp
-	}
-	if toStr := r.URL.Query().Get("to"); toStr != "" {
-		tmp, err := time.Parse("2006-01-02", toStr)
-		if err != nil {
-			http.Error(w, "invalid to date", http.StatusBadRequest)
-			return
-		}
-		filter.To = tmp
-	}
-	apps, err := h.store.ListApplications(r.Context(), filter)
+	apps, err := h.store.ListApplications(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -122,23 +101,6 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, map[string]int64{"application_id": appID, "stage_id": stageID})
-}
-
-func (h *Handler) getNotesByApplicationID(w http.ResponseWriter, r *http.Request) {
-	appID, err := parseID(r)
-	if err != nil {
-		http.Error(w, "invalid application id", http.StatusBadRequest)
-		return
-	}
-	notes, err := h.store.FindNotesByApplicationID(r.Context(), appID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if notes == nil {
-		notes = []*domain.Note{}
-	}
-	writeJSON(w, notes)
 }
 
 func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
