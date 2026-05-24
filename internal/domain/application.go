@@ -76,7 +76,6 @@ type ThreadEmail struct {
 	Subject   string    `json:"subject"`
 	Body      string    `json:"body"`
 	EmailDate time.Time `json:"email_date"`
-	IsStage   bool      `json:"is_stage"`
 }
 
 type Correction struct {
@@ -87,12 +86,17 @@ type Correction struct {
 	Command       string `json:"command"`
 }
 
-type StatusEvent struct {
+type Note struct {
 	ID            int64     `json:"id"`
 	ApplicationID int64     `json:"application_id"`
-	FromStatus    Status    `json:"from_status"`
-	ToStatus      Status    `json:"to_status"`
-	EmailID       string    `json:"email_id"`
-	EmailSubject  string    `json:"email_subject"`
-	ParsedAt      time.Time `json:"parsed_at"`
+	Content       string    `json:"content"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type ApplicationFilter struct {
+	Company string
+	SortBy  string
+	SortDir string
+	From    time.Time
+	To      time.Time
 }

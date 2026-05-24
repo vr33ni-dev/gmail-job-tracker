@@ -137,7 +137,7 @@ func (s *Service) BackfillThreads(ctx context.Context, applicationID int64) erro
 }
 
 func (s *Service) SelfHealForCompanies(ctx context.Context, companies []string) error {
-	allApps, err := s.store.ListApplications(ctx)
+	allApps, err := s.store.ListApplications(ctx, domain.ApplicationFilter{})
 	if err != nil {
 		return fmt.Errorf("self-heal for companies %v: failed to list applications: %w", companies, err)
 	}
@@ -163,7 +163,7 @@ func (s *Service) SelfHealForCompanies(ctx context.Context, companies []string) 
 func (s *Service) SelfHeal(ctx context.Context) error {
 	log.Printf("running self-healing check...")
 
-	apps, err := s.store.ListApplications(ctx)
+	apps, err := s.store.ListApplications(ctx, domain.ApplicationFilter{})
 	if err != nil {
 		return err
 	}
