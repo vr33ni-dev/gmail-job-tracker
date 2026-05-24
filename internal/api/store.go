@@ -8,8 +8,9 @@ import (
 )
 
 type appStore interface {
-	ListApplications(ctx context.Context) ([]domain.Application, error)
+	ListApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error)
 	FindApplicationById(ctx context.Context, id int64) (*domain.Application, error)
+	FindNotesByApplicationID(ctx context.Context, applicationID int64) ([]*domain.Note, error)
 	FindOrCreateApplication(ctx context.Context, company, role, platform, language, url string, appliedAt time.Time) (int64, error)
 	CreateStage(ctx context.Context, applicationID int64, status domain.Status, lastEmailID string, needsReview bool, appliedAt time.Time) (int64, error)
 	GetStageByID(ctx context.Context, stageID int64) (*domain.ApplicationStage, error)
@@ -18,6 +19,7 @@ type appStore interface {
 	AddCorrection(ctx context.Context, emailID, emailSubject, emailBody string, wrongStatus domain.Status, correctStatus string) error
 	UpdateStageStatus(ctx context.Context, stageID int64, status domain.Status, lastEmailID string) error
 	DeleteStage(ctx context.Context, stageID int64) error
+	UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error
 	MarkStageReviewed(ctx context.Context, stageID int64) error
 	GetJourney(ctx context.Context, applicationID int64) ([]domain.ThreadConversation, error)
 	LinkThreadEmailToStage(ctx context.Context, emailID string, stageID int64) error

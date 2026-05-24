@@ -59,7 +59,12 @@ func (c *Client) suggestRuleWithOllama(ctx context.Context, userMsg string) (str
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
 }
 
-func (c *Client) parseWithOllama(ctx context.Context, prompt, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
+func (c *Client) parseWithOllama(ctx context.Context, staticPrompt, corrections, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
+	prompt := staticPrompt
+	if corrections != "" {
+		prompt += corrections
+	}
+
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
 		model = "llama3.1:8b"

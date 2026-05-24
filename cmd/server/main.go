@@ -28,6 +28,9 @@ func main() {
 	log.Printf("isDemo: %v", os.Getenv("IS_DEMO"))
 
 	ctx := context.Background()
+	if err := db.EnsureDatabase(os.Getenv("DATABASE_URL")); err != nil {
+		log.Fatalf("db: %v", err)
+	}
 	store, err := db.New(os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatalf("db: %v", err)
@@ -74,7 +77,7 @@ func main() {
 		}()
 	}
 
-	// 9. start server
+	// start server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

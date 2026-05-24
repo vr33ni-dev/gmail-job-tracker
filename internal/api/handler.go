@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,7 +40,28 @@ func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request) {
-	apps, err := h.store.ListApplications(r.Context())
+	filter := domain.ApplicationFilter{
+		Company: r.URL.Query().Get("company"),
+		SortBy:  r.URL.Query().Get("sort_by"),
+		SortDir: r.URL.Query().Get("sort_dir"),
+	}
+	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
+		tmp, err := time.Parse("2006-01-02", fromStr)
+		if err != nil {
+			http.Error(w, "invalid from date", http.StatusBadRequest)
+			return
+		}
+		filter.From = tmp
+	}
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		tmp, err := time.Parse("2006-01-02", toStr)
+		if err != nil {
+			http.Error(w, "invalid to date", http.StatusBadRequest)
+			return
+		}
+		filter.To = tmp
+	}
+	apps, err := h.store.ListApplications(r.Context(), filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -104,6 +124,23 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]int64{"application_id": appID, "stage_id": stageID})
 }
 
+func (h *Handler) getNotesByApplicationID(w http.ResponseWriter, r *http.Request) {
+	appID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid application id", http.StatusBadRequest)
+		return
+	}
+	notes, err := h.store.FindNotesByApplicationID(r.Context(), appID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if notes == nil {
+		notes = []*domain.Note{}
+	}
+	writeJSON(w, notes)
+}
+
 func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 	if h.sync == nil {
 		http.Error(w, `{"error":"gmail not connected"}`, http.StatusServiceUnavailable)
@@ -148,10 +185,6 @@ func (h *Handler) syncCompany(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, map[string]string{"status": "sync triggered", "company": req.Company})
-}
-
-func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, []domain.StatusEvent{})
 }
 
 func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +233,7 @@ func (h *Handler) deleteApplication(w http.ResponseWriter, r *http.Request) {
 		emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
 		_ = h.store.AddCorrection(r.Context(), stage.LastEmailID, emailSubject, emailBody, stage.Status, "skip")
 	}
+	_ = h.store.UnmarkProcessedEmailsForStage(r.Context(), stageID)
 	if err := h.store.DeleteStage(r.Context(), stageID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -362,26 +396,4 @@ func (h *Handler) getJourney(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, groups)
-}
-
-func parseID(r *http.Request) (int64, error) {
-	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

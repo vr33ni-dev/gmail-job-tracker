@@ -4,14 +4,45 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"net/url"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 )
 
 type Store struct{ db *sql.DB }
+
+// EnsureDatabase creates the database in the DSN if it doesn't exist yet.
+func EnsureDatabase(dsn string) error {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return fmt.Errorf("parse dsn: %w", err)
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	if dbName == "" {
+		return fmt.Errorf("no database name in DSN")
+	}
+	u.Path = "/postgres"
+	sys, err := sql.Open("postgres", u.String())
+	if err != nil {
+		return fmt.Errorf("open system db: %w", err)
+	}
+	defer sys.Close()
+	var exists bool
+	if err := sys.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, dbName).Scan(&exists); err != nil {
+		return fmt.Errorf("check database: %w", err)
+	}
+	if !exists {
+		if _, err := sys.Exec(`CREATE DATABASE ` + pq.QuoteIdentifier(dbName)); err != nil {
+			return fmt.Errorf("create database %q: %w", dbName, err)
+		}
+		log.Printf("db: created database %q", dbName)
+	}
+	return nil
+}
 
 func New(dsn string) (*Store, error) {
 	db, err := sql.Open("postgres", dsn)
@@ -86,15 +117,11 @@ func (s *Store) CreateStage(ctx context.Context, applicationID int64, status dom
 	return id, err
 }
 
-func (s *Store) ListApplicationsByCompany(ctx context.Context, company string) ([]domain.Application, error) {
-	return s.listApplications(ctx, company)
+func (s *Store) ListApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error) {
+	return s.listApplications(ctx, filter)
 }
 
-func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
-	return s.listApplications(ctx, "")
-}
-
-func (s *Store) listApplications(ctx context.Context, company string) ([]domain.Application, error) {
+func (s *Store) listApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error) {
 	aliases := make(map[string]string)
 	aliasRows, err := s.db.QueryContext(ctx, `SELECT alias, canonical FROM company_aliases`)
 	if err == nil {
@@ -113,11 +140,36 @@ func (s *Store) listApplications(ctx context.Context, company string) ([]domain.
 		FROM applications a
 		JOIN application_stages s ON s.application_id = a.id`
 	var args []any
-	if company != "" {
-		query += ` WHERE LOWER(a.company) = LOWER($1)`
-		args = append(args, company)
+	var conditions []string
+	if filter.Company != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(a.company) LIKE LOWER($%d)", len(args)+1))
+		args = append(args, "%"+filter.Company+"%")
 	}
-	query += ` ORDER BY a.company, a.role, s.applied_at ASC`
+	if !filter.From.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("a.applied_at >= $%d", len(args)+1))
+		args = append(args, filter.From)
+	}
+	if !filter.To.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("a.applied_at <= $%d", len(args)+1))
+		args = append(args, filter.To)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	validSortColumns := map[string]string{
+		"company":    "a.company",
+		"applied_at": "a.applied_at",
+	}
+	col, ok := validSortColumns[filter.SortBy]
+	if !ok {
+		col = "a.company"
+	}
+	dir := "ASC"
+	if strings.EqualFold(filter.SortDir, "desc") {
+		dir = "DESC"
+	}
+	query += fmt.Sprintf(" ORDER BY %s %s, s.applied_at ASC", col, dir)
+
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -387,8 +439,6 @@ func (s *Store) FixEmptyRoles(ctx context.Context) error {
 	return err
 }
 
-
-
 func (s *Store) IsEmailProcessed(ctx context.Context, emailID string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRowContext(ctx,
@@ -414,6 +464,16 @@ func (s *Store) LastPollTime(ctx context.Context) (time.Time, error) {
 
 func (s *Store) UnmarkEmailProcessed(ctx context.Context, emailID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM processed_emails WHERE email_id = $1`, emailID)
+	return err
+}
+
+func (s *Store) UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM processed_emails WHERE email_id IN (
+			SELECT email_id FROM thread_emails WHERE stage_id = $1
+			UNION
+			SELECT last_email_id FROM application_stages WHERE id = $1 AND last_email_id != ''
+		)`, stageID)
 	return err
 }
 
@@ -628,7 +688,6 @@ func (s *Store) GetJourney(ctx context.Context, applicationID int64) ([]domain.T
 		}
 		if stageID.Valid {
 			e.StageID = &stageID.Int64
-			e.IsStage = true
 		}
 		emails = append(emails, e)
 	}
@@ -641,7 +700,7 @@ func (s *Store) GetJourney(ctx context.Context, applicationID int64) ([]domain.T
 func groupEmailsByStage(emails []domain.ThreadEmail) []domain.ThreadConversation {
 	var stageIdx []int
 	for i, e := range emails {
-		if e.IsStage {
+		if e.StageID != nil {
 			stageIdx = append(stageIdx, i)
 		}
 	}
@@ -653,7 +712,7 @@ func groupEmailsByStage(emails []domain.ThreadEmail) []domain.ThreadConversation
 		result[k] = domain.ThreadConversation{Stage: emails[si], Conversation: []domain.ThreadEmail{}}
 	}
 	for i, e := range emails {
-		if e.IsStage {
+		if e.StageID != nil {
 			continue
 		}
 		groupIdx := 0
@@ -726,8 +785,28 @@ func (s *Store) FixAllAppliedStageDates(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) GetSetting(ctx context.Context, key string) string {
-	var value string
-	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=$1`, key).Scan(&value)
-	return value
+func (s *Store) FindNotesByApplicationID(ctx context.Context, applicationID int64) ([]*domain.Note, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, application_id, content, created_at
+		FROM notes
+		WHERE application_id = $1
+		ORDER BY created_at DESC
+	`, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notes []*domain.Note
+	for rows.Next() {
+		var n domain.Note
+		if err := rows.Scan(&n.ID, &n.ApplicationID, &n.Content, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		notes = append(notes, &n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return notes, nil
 }
