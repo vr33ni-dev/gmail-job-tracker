@@ -24,7 +24,7 @@ func NewRouter(h *Handler, onAuthDone func()) http.Handler {
 			return
 		}
 		log.Printf("gmail connected, token expires %s", token.Expiry.Format("2006-01-02 15:04"))
-		if onAuthDone != nil {
+		if onAuthDone != nil { // defensive programming: make NewRouter safe to call without a callback, for example in tests where we don't need to start the sync service
 			onAuthDone()
 		}
 	})
@@ -32,6 +32,7 @@ func NewRouter(h *Handler, onAuthDone func()) http.Handler {
 	// Status endpoint
 	r.Get("/auth/status", h.authStatus)
 
+	// Application routes
 	r.Route("/api/applications", func(r chi.Router) {
 		r.Get("/", h.listApplications)
 		r.Post("/", h.createApplication)
@@ -44,13 +45,17 @@ func NewRouter(h *Handler, onAuthDone func()) http.Handler {
 		r.Post("/{id}/suggest-rule", h.suggestRule)
 	})
 
+	// Sync routes
 	r.Route("/api/sync", func(r chi.Router) {
 		r.Post("/", h.triggerSync)
 		r.Post("/company", h.syncCompany)
 		r.Post("/heal", h.triggerSelfHeal)
 	})
 
+	// Thread email routes
 	r.Post("/api/thread-emails/{id}/promote", h.promoteThreadEmail)
+
+	// Correction rules
 	r.Post("/api/corrections/rule", h.addCorrectionRule)
 	return r
 }
