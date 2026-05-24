@@ -584,20 +584,6 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) (string, 
 			log.Printf("skipping duplicate applied email for %s/%s: %s", company, role, email.ID)
 			return "", s.store.MarkEmailProcessed(ctx, email.ID)
 		}
-		// don't create an applied stage from an email that arrived after an interview already started.
-		// existingApp.Stages is not loaded by FindApplicationByCompanyAndRole, so query directly.
-		if interviewStages, err := s.store.GetStagesByStatus(ctx, existingApp.ID, domain.StatusInterview); err == nil && len(interviewStages) > 0 {
-			earliest := interviewStages[0].AppliedAt
-			for _, st := range interviewStages[1:] {
-				if st.AppliedAt.Before(earliest) {
-					earliest = st.AppliedAt
-				}
-			}
-			if !email.Date.Before(earliest) {
-				log.Printf("skipping late applied email — interview already in progress for %s/%s: %s", company, role, email.ID)
-				return "", s.store.MarkEmailProcessed(ctx, email.ID)
-			}
-		}
 	}
 
 	appID := threadAppID
