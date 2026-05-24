@@ -66,21 +66,18 @@ func main() {
 	// onAuthDone hook — called by router after successful auth
 	r := api.NewRouter(h, func() { startSync(userEmail, userName) })
 
-	// start sync or open browser
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 	if auth.IsConnected() {
 		startSync(userEmail, userName)
 	} else {
 		log.Println("gmail not connected — opening browser to authenticate...")
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			exec.Command("open", "http://localhost:8080/auth/login").Start() // macOS only
+			exec.Command("open", "http://localhost:"+port+"/auth/login").Start() // macOS only
 		}()
-	}
-
-	// start server
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
 	}
 	log.Printf("listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
