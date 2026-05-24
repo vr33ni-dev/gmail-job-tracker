@@ -36,7 +36,6 @@ func NewRouter(h *Handler, onAuthDone func()) http.Handler {
 		r.Get("/", h.listApplications)
 		r.Post("/", h.createApplication)
 		r.Get("/{id}", h.getApplicationById)
-		r.Get("/{id}/events", h.listEvents)
 		r.Post("/{id}/correct", h.correctApplication)
 		r.Post("/{id}/reviewed", h.markReviewed)
 		r.Delete("/{id}", h.deleteApplication)

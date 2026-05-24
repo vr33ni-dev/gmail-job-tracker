@@ -78,6 +78,7 @@ IMPORTANT RULES:
   ✓ ROLE: "Senior Software Engineer", "Full Stack Developer", "Product Manager" (what the candidate applied for)
   ✗ NOT ROLE: "Head of AI and Engineering", "VP of Product", "Engineering Manager" (these are the interviewer's title — extract from the body what the candidate applied for instead, or use "")
   ✗ NOT ROLE: email subject lines, meeting titles, or department names
+  ✗ NOT ROLE: combined titles like "Junior Full Stack Engineer/Senior Backend Engineer" — role must be ONE job title, never combine two with "/" or "or"
 - If role cannot be determined, use "" (empty string) — do not guess
 - Set confidence "low" if: newsletter, marketing/promotional, product announcement, or unrelated to a job application (contains "Newsletter", "nur solange der Vorrat reicht", "Abmelden", or is about products/sales)
 - Set confidence "high" if: email clearly relates to a specific job application with identifiable company and status
@@ -85,12 +86,11 @@ IMPORTANT RULES:
 - applied, offer, rejected, and withdrawn can each occur ONLY ONCE per application. If you receive a second email of any of these types (e.g. a reminder about a rejection, a follow-up on an offer, a second confirmation of withdrawal), set is_duplicate: true`
 
 func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (*domain.ParsedEmail, error) {
-	prompt := systemPrompt
+	var corrections string
 	if c.store != nil {
-		if corrections, err := c.store.GetRecentCorrections(ctx, 20); err == nil && len(corrections) > 0 {
-			// split into rules (commands) and examples so rules are injected first
+		if corrs, err := c.store.GetRecentCorrections(ctx, 20); err == nil && len(corrs) > 0 {
 			var rules, examples []domain.Correction
-			for _, cor := range corrections {
+			for _, cor := range corrs {
 				if cor.Command != "" {
 					rules = append(rules, cor)
 				} else {
@@ -98,27 +98,27 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 				}
 			}
 			if len(rules) > 0 || len(examples) > 0 {
-				prompt += "\n\nPrevious corrections and rules (apply these):\n"
+				corrections += "\n\nPrevious corrections and rules (apply these):\n"
 			}
 			for _, cor := range rules {
-				prompt += fmt.Sprintf("- RULE: %s\n", cor.Command)
+				corrections += fmt.Sprintf("- RULE: %s\n", cor.Command)
 			}
 			for _, cor := range examples {
 				excerpt := truncate(cor.EmailSubject+": "+cor.EmailBody, 200)
 				switch {
 				case cor.CorrectStatus == "skip":
-					prompt += fmt.Sprintf("- SKIP (set confidence low, is_duplicate true) emails like this — they are noise and should not create an application: %q\n", excerpt)
+					corrections += fmt.Sprintf("- SKIP (set confidence low, is_duplicate true) emails like this — they are noise and should not create an application: %q\n", excerpt)
 				case cor.CorrectStatus == "conversation":
-					prompt += fmt.Sprintf("- CONVERSATION (set is_duplicate true) emails like this — they are part of an ongoing thread but not a new stage milestone: %q\n", excerpt)
+					corrections += fmt.Sprintf("- CONVERSATION (set is_duplicate true) emails like this — they are part of an ongoing thread but not a new stage milestone: %q\n", excerpt)
 				case cor.WrongStatus != "" && cor.CorrectStatus != "":
-					prompt += fmt.Sprintf("- Email %q was classified as %s but correct classification is %s\n",
+					corrections += fmt.Sprintf("- Email %q was classified as %s but correct classification is %s\n",
 						excerpt, cor.WrongStatus, cor.CorrectStatus)
 				}
 			}
 		}
 	}
 
-	// build existing-stages context to inject into the user message
+	// build existing-stages context
 	var existingContext string
 	if len(existingStages) > 0 {
 		existingContext = "\n\nEXISTING_STAGES_SAME_STATUS (already recorded for this company+role):\n"
@@ -131,9 +131,9 @@ func (c *Client) ParseJobEmail(ctx context.Context, subject, body, from string, 
 
 	switch c.provider {
 	case "claude":
-		return c.parseWithClaude(ctx, prompt, subject, body, from, existingContext)
+		return c.parseWithClaude(ctx, systemPrompt, corrections, subject, body, from, existingContext)
 	default:
-		return c.parseWithOllama(ctx, prompt, subject, body, from, existingContext)
+		return c.parseWithOllama(ctx, systemPrompt, corrections, subject, body, from, existingContext)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -150,10 +149,6 @@ func (h *Handler) syncCompany(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "sync triggered", "company": req.Company})
 }
 
-func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, []domain.StatusEvent{})
-}
-
 func (h *Handler) correctApplication(w http.ResponseWriter, r *http.Request) {
 	stageID, err := parseID(r)
 	if err != nil {
@@ -200,6 +195,7 @@ func (h *Handler) deleteApplication(w http.ResponseWriter, r *http.Request) {
 		emailSubject, emailBody := h.store.GetThreadEmailSubjectAndBody(r.Context(), stage.LastEmailID)
 		_ = h.store.AddCorrection(r.Context(), stage.LastEmailID, emailSubject, emailBody, stage.Status, "skip")
 	}
+	_ = h.store.UnmarkProcessedEmailsForStage(r.Context(), stageID)
 	if err := h.store.DeleteStage(r.Context(), stageID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -362,26 +358,4 @@ func (h *Handler) getJourney(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, groups)
-}
-
-func parseID(r *http.Request) (int64, error) {
-	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

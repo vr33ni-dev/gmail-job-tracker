@@ -23,4 +23,5 @@ type appStore interface {
 	LinkThreadEmailToStage(ctx context.Context, emailID string, stageID int64) error
 	TagThreadEmailsForApplication(ctx context.Context, threadID string, applicationID int64) error
 	AddCorrectionRule(ctx context.Context, rule string) error
+	UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error
 }

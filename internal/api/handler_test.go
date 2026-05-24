@@ -32,6 +32,7 @@ type mockStore struct {
 	linkThreadEmailToStage        func(ctx context.Context, emailID string, stageID int64) error
 	tagThreadEmailsForApp         func(ctx context.Context, threadID string, applicationID int64) error
 	addCorrectionRule             func(ctx context.Context, rule string) error
+	unmarkProcessedEmailsForStage func(ctx context.Context, stageID int64) error
 }
 
 func (m *mockStore) ListApplications(ctx context.Context) ([]domain.Application, error) {
@@ -78,6 +79,9 @@ func (m *mockStore) TagThreadEmailsForApplication(ctx context.Context, threadID 
 }
 func (m *mockStore) AddCorrectionRule(ctx context.Context, rule string) error {
 	return m.addCorrectionRule(ctx, rule)
+}
+func (m *mockStore) UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error {
+	return m.unmarkProcessedEmailsForStage(ctx, stageID)
 }
 
 // newTestHandler builds a Handler with the given mock store and no sync/llm.

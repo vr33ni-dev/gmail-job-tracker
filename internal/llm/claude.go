@@ -54,17 +54,42 @@ func (c *Client) suggestRuleWithClaude(ctx context.Context, userMsg string) (str
 	return strings.TrimSpace(out.Content[0].Text), nil
 }
 
-func (c *Client) parseWithClaude(ctx context.Context, prompt, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
+type systemBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
+func (c *Client) parseWithClaude(ctx context.Context, staticPrompt, corrections, subject, body, from, existingContext string) (*domain.ParsedEmail, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 
 	type msg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
+
+	systemBlocks := []systemBlock{
+		{
+			Type:         "text",
+			Text:         staticPrompt,
+			CacheControl: &cacheControl{Type: "ephemeral"},
+		},
+	}
+	if corrections != "" {
+		systemBlocks = append(systemBlocks, systemBlock{
+			Type: "text",
+			Text: corrections,
+		})
+	}
+
 	payload, _ := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-4-20250514",
+		"model":      "claude-haiku-4-5-20251001",
 		"max_tokens": 300,
-		"system":     prompt,
+		"system":     systemBlocks,
 		"messages":   []msg{{Role: "user", Content: fmt.Sprintf("From: %s\nSubject: %s\n\n%s%s", from, subject, truncate(body, 2000), existingContext)}},
 	})
 
@@ -81,6 +106,7 @@ func (c *Client) parseWithClaude(ctx context.Context, prompt, subject, body, fro
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-api-key", apiKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {

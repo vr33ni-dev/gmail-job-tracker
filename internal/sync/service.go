@@ -152,8 +152,23 @@ func (s *Service) SelfHealForCompanies(ctx context.Context, companies []string) 
 		}
 	}
 
-	s.selfHealAppliedStages(ctx, apps)
 	s.selfHealSchedulingEmails(ctx, apps)
+
+	// reload so selfHealAppliedStages sees any stages added by scheduling heal
+	allApps, err = s.store.ListApplications(ctx)
+	if err != nil {
+		return fmt.Errorf("self-heal for companies %v: failed to reload applications: %w", companies, err)
+	}
+	apps = apps[:0]
+	for _, app := range allApps {
+		for _, company := range companies {
+			if strings.EqualFold(domain.NormalizeCompany(app.Company), domain.NormalizeCompany(company)) {
+				apps = append(apps, app)
+				break
+			}
+		}
+	}
+	s.selfHealAppliedStages(ctx, apps)
 	log.Printf("self-heal: complete for %v", companies)
 
 	// no data quality fixes here — save those for full heal
@@ -168,8 +183,14 @@ func (s *Service) SelfHeal(ctx context.Context) error {
 		return err
 	}
 
-	s.selfHealAppliedStages(ctx, apps)
 	s.selfHealSchedulingEmails(ctx, apps)
+
+	// reload so selfHealAppliedStages sees any stages added by scheduling heal
+	apps, err = s.store.ListApplications(ctx)
+	if err != nil {
+		return err
+	}
+	s.selfHealAppliedStages(ctx, apps)
 
 	if err := s.store.FixEmptyRoles(ctx); err != nil {
 		log.Printf("self-heal: fix roles error: %v", err)

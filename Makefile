@@ -25,7 +25,7 @@ db-corrections:
 # see all IDs for Bluefish
 # make withdraw id=123
 withdraw:
-	$(DB) -c "INSERT INTO applications (company, role, platform, applied_at, status, last_email_id, email_body, notes, url, language) SELECT company, role, platform, NOW(), 'withdrawn', '', '', '', '', language FROM applications WHERE id=$(id) LIMIT 1;"
+	$(DB) -c "INSERT INTO applications (company, role, platform, applied_at, status, last_email_id, email_body, url, language) SELECT company, role, platform, NOW(), 'withdrawn', '', '', '', '', language FROM applications WHERE id=$(id) LIMIT 1;"
 
 db-seed:
 	$(DB) < internal/db/seeds.sql
