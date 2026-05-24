@@ -117,11 +117,11 @@ func (s *Store) CreateStage(ctx context.Context, applicationID int64, status dom
 	return id, err
 }
 
-func (s *Store) ListApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error) {
-	return s.listApplications(ctx, filter)
+func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
+	return s.listApplications(ctx, "")
 }
 
-func (s *Store) listApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error) {
+func (s *Store) listApplications(ctx context.Context, company string) ([]domain.Application, error) {
 	aliases := make(map[string]string)
 	aliasRows, err := s.db.QueryContext(ctx, `SELECT alias, canonical FROM company_aliases`)
 	if err == nil {
@@ -140,36 +140,11 @@ func (s *Store) listApplications(ctx context.Context, filter domain.ApplicationF
 		FROM applications a
 		JOIN application_stages s ON s.application_id = a.id`
 	var args []any
-	var conditions []string
-	if filter.Company != "" {
-		conditions = append(conditions, fmt.Sprintf("LOWER(a.company) LIKE LOWER($%d)", len(args)+1))
-		args = append(args, "%"+filter.Company+"%")
+	if company != "" {
+		query += ` WHERE LOWER(a.company) = LOWER($1)`
+		args = append(args, company)
 	}
-	if !filter.From.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("a.applied_at >= $%d", len(args)+1))
-		args = append(args, filter.From)
-	}
-	if !filter.To.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("a.applied_at <= $%d", len(args)+1))
-		args = append(args, filter.To)
-	}
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	validSortColumns := map[string]string{
-		"company":    "a.company",
-		"applied_at": "a.applied_at",
-	}
-	col, ok := validSortColumns[filter.SortBy]
-	if !ok {
-		col = "a.company"
-	}
-	dir := "ASC"
-	if strings.EqualFold(filter.SortDir, "desc") {
-		dir = "DESC"
-	}
-	query += fmt.Sprintf(" ORDER BY %s %s, s.applied_at ASC", col, dir)
-
+	query += ` ORDER BY a.company, a.role, s.applied_at ASC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -783,30 +758,4 @@ func (s *Store) FixAllAppliedStageDates(ctx context.Context) error {
 			SELECT MIN(s.applied_at) FROM application_stages s WHERE s.application_id = a.id
 		)`)
 	return err
-}
-
-func (s *Store) FindNotesByApplicationID(ctx context.Context, applicationID int64) ([]*domain.Note, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, application_id, content, created_at
-		FROM notes
-		WHERE application_id = $1
-		ORDER BY created_at DESC
-	`, applicationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var notes []*domain.Note
-	for rows.Next() {
-		var n domain.Note
-		if err := rows.Scan(&n.ID, &n.ApplicationID, &n.Content, &n.CreatedAt); err != nil {
-			return nil, err
-		}
-		notes = append(notes, &n)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return notes, nil
 }

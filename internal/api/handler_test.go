@@ -17,9 +17,8 @@ import (
 // mockStore lets each test set only the functions it needs; all others panic
 // if called unexpectedly, making missing stubs obvious.
 type mockStore struct {
-	listApplications              func(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error)
+	listApplications              func(ctx context.Context) ([]domain.Application, error)
 	findApplicationById           func(ctx context.Context, id int64) (*domain.Application, error)
-	findNotesByApplicationID      func(ctx context.Context, applicationID int64) ([]*domain.Note, error)
 	findOrCreateApplication       func(ctx context.Context, company, role, platform, language, url string, appliedAt time.Time) (int64, error)
 	createStage                   func(ctx context.Context, applicationID int64, status domain.Status, lastEmailID string, needsReview bool, appliedAt time.Time) (int64, error)
 	getStageByID                  func(ctx context.Context, stageID int64) (*domain.ApplicationStage, error)
@@ -36,14 +35,11 @@ type mockStore struct {
 	unmarkProcessedEmailsForStage func(ctx context.Context, stageID int64) error
 }
 
-func (m *mockStore) ListApplications(ctx context.Context, filter domain.ApplicationFilter) ([]domain.Application, error) {
-	return m.listApplications(ctx, filter)
+func (m *mockStore) ListApplications(ctx context.Context) ([]domain.Application, error) {
+	return m.listApplications(ctx)
 }
 func (m *mockStore) FindApplicationById(ctx context.Context, id int64) (*domain.Application, error) {
 	return m.findApplicationById(ctx, id)
-}
-func (m *mockStore) FindNotesByApplicationID(ctx context.Context, applicationID int64) ([]*domain.Note, error) {
-	return m.findNotesByApplicationID(ctx, applicationID)
 }
 func (m *mockStore) FindOrCreateApplication(ctx context.Context, company, role, platform, language, url string, appliedAt time.Time) (int64, error) {
 	return m.findOrCreateApplication(ctx, company, role, platform, language, url, appliedAt)
@@ -107,7 +103,7 @@ func TestListApplications_OK(t *testing.T) {
 		{ID: 1, Company: "Acme", Role: "Engineer"},
 	}
 	h := newTestHandler(&mockStore{
-		listApplications: func(_ context.Context, _ domain.ApplicationFilter) ([]domain.Application, error) { return apps, nil },
+		listApplications: func(_ context.Context) ([]domain.Application, error) { return apps, nil },
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
@@ -128,7 +124,7 @@ func TestListApplications_OK(t *testing.T) {
 
 func TestListApplications_EmptySlice(t *testing.T) {
 	h := newTestHandler(&mockStore{
-		listApplications: func(_ context.Context, _ domain.ApplicationFilter) ([]domain.Application, error) { return nil, nil },
+		listApplications: func(_ context.Context) ([]domain.Application, error) { return nil, nil },
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
@@ -149,7 +145,7 @@ func TestListApplications_EmptySlice(t *testing.T) {
 
 func TestListApplications_StoreError(t *testing.T) {
 	h := newTestHandler(&mockStore{
-		listApplications: func(_ context.Context, _ domain.ApplicationFilter) ([]domain.Application, error) {
+		listApplications: func(_ context.Context) ([]domain.Application, error) {
 			return nil, errors.New("db error")
 		},
 	})
@@ -214,66 +210,6 @@ func TestGetApplicationById_InvalidID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/applications/abc", nil)
 	rec := httptest.NewRecorder()
 	routeWith(http.MethodGet, "/api/applications/{id}", h.getApplicationById).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-// ── getNotesByApplicationID ─────────────────────────────────────────────────
-
-func TestGetNotesByApplicationID_OK(t *testing.T) {
-	notes := []*domain.Note{
-		{ID: 1, ApplicationID: 42, Content: "First note"},
-		{ID: 2, ApplicationID: 42, Content: "Second note"},
-	}
-	h := newTestHandler(&mockStore{
-		findNotesByApplicationID: func(_ context.Context, applicationID int64) ([]*domain.Note, error) {
-			if applicationID != 42 {
-				t.Errorf("got applicationID=%d, want 42", applicationID)
-			}
-			return notes, nil
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/applications/42/notes", nil)
-	rec := httptest.NewRecorder()
-	routeWith(http.MethodGet, "/api/applications/{id}/notes", h.getNotesByApplicationID).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var got []*domain.Note
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(got) != 2 || got[0].Content != "First note" {
-		t.Fatalf("unexpected notes: %+v", got)
-	}
-}
-
-func TestGetNotesByApplicationID_NoNotes(t *testing.T) {
-	h := newTestHandler(&mockStore{
-		findNotesByApplicationID: func(_ context.Context, _ int64) ([]*domain.Note, error) {
-			return nil, nil
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/applications/99/notes", nil)
-	rec := httptest.NewRecorder()
-	routeWith(http.MethodGet, "/api/applications/{id}/notes", h.getNotesByApplicationID).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-}
-
-func TestGetNotesByApplicationID_InvalidID(t *testing.T) {
-	h := newTestHandler(&mockStore{})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/applications/abc/notes", nil)
-	rec := httptest.NewRecorder()
-	routeWith(http.MethodGet, "/api/applications/{id}/notes", h.getNotesByApplicationID).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
