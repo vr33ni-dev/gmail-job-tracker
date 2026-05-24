@@ -15,7 +15,7 @@ import (
 )
 
 type emailParser interface {
-	ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (domain.ParsedEmail, error)
+	ParseJobEmail(ctx context.Context, subject, body, from string, existingStages []domain.ApplicationStage) (*domain.ParsedEmail, error)
 }
 
 type syncStore interface {
