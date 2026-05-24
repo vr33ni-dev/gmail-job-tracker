@@ -148,6 +148,6 @@ make db-seed OR make db-seed-demo
 
 After every `make db-reset`, run `make db-seed` to restore your config. Or use `make db-fresh` which does both.
 
-## TODO
+## Outlook
 
-Follow my Github Issues to stay tunes for future improvements.
+Follow my Github Issues to stay tuned for future improvements.
