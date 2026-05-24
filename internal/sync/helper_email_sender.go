@@ -20,11 +20,6 @@ func isSchedulingService(from string) bool {
 		strings.Contains(lower, "chilipiper.com")
 }
 
-// senderDisplayName extracts the display name from a From header (e.g.
-// "Acto <acto-jobs@m.personio.com>" → "Acto"), returning "" for individual
-// person names and known non-company senders.
-// extractDisplayName pulls the display name from a From header including person
-// names — unlike senderDisplayName, it does not filter out two-word person names.
 func extractDisplayName(from string) string {
 	re := regexp.MustCompile(`^"?([^"<]+?)"?\s*<`)
 	m := re.FindStringSubmatch(strings.TrimSpace(from))

@@ -382,47 +382,6 @@ func (s *Service) processEmail(ctx context.Context, email gmail.Email) (string, 
 		}
 	}
 
-	// Hallucination guard: small models (Ollama) sometimes confabulate a company
-	// name from few-shot corrections in the prompt. Two passes:
-	// 1. If the FIRST significant word of the company is not in subject+sender,
-	//    the whole name is wrong (e.g. "Emma…" for an Acto email) — replace with
-	//    the sender display name.
-	// 2. If the first word is valid but a suffix after " – "/" - " has no words in
-	//    context, strip it (e.g. "Acto - The Sleep Company" → "Acto").
-	if parsed.Company != "" {
-		ctxLower := strings.ToLower(email.Subject + " " + email.From)
-		firstWord := ""
-		for _, word := range strings.Fields(strings.ToLower(parsed.Company)) {
-			if len(word) > 3 {
-				firstWord = word
-				break
-			}
-		}
-		if firstWord != "" && !strings.Contains(ctxLower, firstWord) {
-			override := senderDisplayName(email.From)
-			parsed.Company = override
-		} else {
-			for _, sep := range []string{" – ", " - "} {
-				idx := strings.Index(parsed.Company, sep)
-				if idx == -1 {
-					continue
-				}
-				suffix := strings.ToLower(parsed.Company[idx+len(sep):])
-				suffixInCtx := false
-				for _, word := range strings.Fields(suffix) {
-					if len(word) > 3 && strings.Contains(ctxLower, word) {
-						suffixInCtx = true
-						break
-					}
-				}
-				if !suffixInCtx {
-					parsed.Company = parsed.Company[:idx]
-				}
-				break
-			}
-		}
-	}
-
 	// skip emails where LLM extracted an obviously invalid company name.
 	// Exception: scheduling service emails with a meeting link — try matching by
 	// person name extracted from the subject before giving up.

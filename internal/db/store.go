@@ -225,20 +225,6 @@ func (s *Store) GetStageByID(ctx context.Context, stageID int64) (*domain.Applic
 	return &st, nil
 }
 
-func (s *Store) GetApplicationByStageID(ctx context.Context, stageID int64) (*domain.Application, error) {
-	var app domain.Application
-	err := s.db.QueryRowContext(ctx,
-		`SELECT a.id, a.company, a.role, a.platform, a.language, a.url, a.applied_at
-		 FROM applications a
-		 JOIN application_stages s ON s.application_id = a.id
-		 WHERE s.id=$1`, stageID,
-	).Scan(&app.ID, &app.Company, &app.Role, &app.Platform, &app.Language, &app.URL, &app.AppliedAt)
-	if err != nil {
-		return nil, err
-	}
-	return &app, nil
-}
-
 func (s *Store) FindApplicationByCompanyAndRole(ctx context.Context, company, role string) (*domain.Application, error) {
 	var app domain.Application
 	err := s.db.QueryRowContext(ctx,
@@ -608,15 +594,6 @@ func (s *Store) TagThreadEmailsForApplication(ctx context.Context, threadID stri
 		`UPDATE thread_emails SET application_id=$1 WHERE thread_id=$2`,
 		applicationID, threadID)
 	return err
-}
-
-func (s *Store) GetThreadEmailBody(ctx context.Context, emailID string) string {
-	if emailID == "" {
-		return ""
-	}
-	var body string
-	_ = s.db.QueryRowContext(ctx, `SELECT body FROM thread_emails WHERE email_id=$1`, emailID).Scan(&body)
-	return body
 }
 
 func (s *Store) GetThreadEmailSubjectAndBody(ctx context.Context, emailID string) (subject, body string) {
