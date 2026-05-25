@@ -117,6 +117,46 @@ func (s *Store) CreateStage(ctx context.Context, applicationID int64, status dom
 	return id, err
 }
 
+func (s *Store) ListNotesByApplicationID(ctx context.Context, applicationID int64) ([]domain.Note, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, application_id, content, created_at, updated_at
+		 FROM notes WHERE application_id=$1 ORDER BY created_at ASC`, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var notes []domain.Note
+	for rows.Next() {
+		var n domain.Note
+		if err := rows.Scan(&n.ID, &n.ApplicationID, &n.Content, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		notes = append(notes, n)
+	}
+	return notes, rows.Err()
+}
+
+func (s *Store) AddNote(ctx context.Context, applicationID int64, content string) (*domain.Note, error) {
+	var note domain.Note
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO notes (application_id, content, created_at, updated_at)
+		 VALUES ($1, $2, NOW(), NOW()) RETURNING id`,
+		applicationID, content,
+	).Scan(&note.ID)
+	return &domain.Note{ID: note.ID, ApplicationID: applicationID, Content: content, CreatedAt: time.Now(), UpdatedAt: time.Now()}, err
+}
+
+func (s *Store) UpdateNote(ctx context.Context, noteID int64, content string) (*domain.Note, error) {
+	var note domain.Note
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE notes SET content=$1, updated_at=NOW() WHERE id=$2 RETURNING *`, content, noteID).
+		Scan(&note.ID, &note.ApplicationID, &note.Content, &note.CreatedAt, &note.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.Note{ID: noteID, ApplicationID: note.ApplicationID, Content: content, CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
+}
+
 func (s *Store) ListApplications(ctx context.Context) ([]domain.Application, error) {
 	return s.listApplications(ctx, "")
 }

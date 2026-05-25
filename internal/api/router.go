@@ -45,6 +45,13 @@ func NewRouter(h *Handler, onAuthDone func()) http.Handler {
 		r.Post("/{id}/suggest-rule", h.suggestRule)
 	})
 
+	// Note routes
+	r.Route("/api/notes", func(r chi.Router) {
+		r.Get("/applications/{id}", h.getNotesByApplicationID)
+		r.Post("/application/{id}/", h.addNote)
+		r.Patch("/{id}", h.updateNote)
+	})
+
 	// Sync routes
 	r.Route("/api/sync", func(r chi.Router) {
 		r.Post("/", h.triggerSync)

@@ -85,3 +85,11 @@ type Correction struct {
 	CorrectStatus string `json:"correct_status"`
 	Command       string `json:"command"`
 }
+
+type Note struct {
+	ID            int64     `json:"id"`
+	ApplicationID int64     `json:"application_id"`
+	Content       string    `json:"content"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}

@@ -24,6 +24,9 @@ type appStore interface {
 	TagThreadEmailsForApplication(ctx context.Context, threadID string, applicationID int64) error
 	AddCorrectionRule(ctx context.Context, rule string) error
 	UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error
+	ListNotesByApplicationID(ctx context.Context, applicationID int64) ([]domain.Note, error)
+	AddNote(ctx context.Context, applicationID int64, content string) (*domain.Note, error)
+	UpdateNote(ctx context.Context, noteID int64, content string) (*domain.Note, error)
 }
 
 type ruleSuggester interface {

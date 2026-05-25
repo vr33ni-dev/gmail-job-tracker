@@ -33,6 +33,9 @@ type mockStore struct {
 	tagThreadEmailsForApp         func(ctx context.Context, threadID string, applicationID int64) error
 	addCorrectionRule             func(ctx context.Context, rule string) error
 	unmarkProcessedEmailsForStage func(ctx context.Context, stageID int64) error
+	listNotesByApplicationID      func(ctx context.Context, applicationID int64) ([]domain.Note, error)
+	addNote                       func(ctx context.Context, applicationID int64, content string) (*domain.Note, error)
+	updateNote                    func(ctx context.Context, noteID int64, content string) (*domain.Note, error)
 }
 
 func (m *mockStore) ListApplications(ctx context.Context) ([]domain.Application, error) {
@@ -82,6 +85,18 @@ func (m *mockStore) AddCorrectionRule(ctx context.Context, rule string) error {
 }
 func (m *mockStore) UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error {
 	return m.unmarkProcessedEmailsForStage(ctx, stageID)
+}
+
+func (m *mockStore) ListNotesByApplicationID(ctx context.Context, applicationID int64) ([]domain.Note, error) {
+	return m.listNotesByApplicationID(ctx, applicationID)
+}
+
+func (m *mockStore) AddNote(ctx context.Context, applicationID int64, content string) (*domain.Note, error) {
+	return m.addNote(ctx, applicationID, content)
+}
+
+func (m *mockStore) UpdateNote(ctx context.Context, noteID int64, content string) (*domain.Note, error) {
+	return m.updateNote(ctx, noteID, content)
 }
 
 // newTestHandler builds a Handler with the given mock store and no sync/llm.

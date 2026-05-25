@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,9 +16,12 @@ import (
 )
 
 type Handler struct {
-	store appStore
-	sync  syncService
-	llm   ruleSuggester
+	store      appStore
+	sync       syncService
+	llm        ruleSuggester
+	mu         sync.Mutex
+	isSyncing  bool
+	cancelSync context.CancelFunc
 }
 
 func NewHandler(store *db.Store, llm ruleSuggester) *Handler {
@@ -67,6 +71,66 @@ func (h *Handler) getApplicationById(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, app)
 }
 
+func (h *Handler) getNotesByApplicationID(w http.ResponseWriter, r *http.Request) {
+	appID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	notes, err := h.store.ListNotesByApplicationID(r.Context(), appID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if notes == nil {
+		notes = []domain.Note{}
+	}
+	writeJSON(w, notes)
+}
+
+func (h *Handler) addNote(w http.ResponseWriter, r *http.Request) {
+	appID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	note, err := h.store.AddNote(r.Context(), appID, req.Content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, note)
+}
+
+func (h *Handler) updateNote(w http.ResponseWriter, r *http.Request) {
+	noteID, err := parseID(r)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if note, err := h.store.UpdateNote(r.Context(), noteID, req.Content); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else {
+		writeJSON(w, note)
+	}
+}
+
 func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Company  string `json:"company"`
@@ -106,8 +170,26 @@ func (h *Handler) triggerSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"gmail not connected"}`, http.StatusServiceUnavailable)
 		return
 	}
+
+	h.mu.Lock()
+	if h.isSyncing {
+		h.mu.Unlock()
+		http.Error(w, `{"error":"sync already in progress"}`, http.StatusConflict)
+		return
+	}
+	h.isSyncing = true
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancelSync = cancel
+	h.mu.Unlock()
+
 	go func() {
-		if err := h.sync.SyncAll(context.Background()); err != nil {
+		defer func() {
+			h.mu.Lock()
+			h.isSyncing = false
+			h.cancelSync = nil
+			h.mu.Unlock()
+		}()
+		if err := h.sync.SyncAll(ctx); err != nil {
 			log.Printf("sync error: %v", err)
 		}
 	}()
