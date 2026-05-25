@@ -25,3 +25,14 @@ type appStore interface {
 	AddCorrectionRule(ctx context.Context, rule string) error
 	UnmarkProcessedEmailsForStage(ctx context.Context, stageID int64) error
 }
+
+type ruleSuggester interface {
+	SuggestRule(ctx context.Context, emailSubject, emailBody, wrongStatus, correctStatus string) (string, error)
+}
+
+type syncService interface {
+	SyncAll(ctx context.Context) error
+	SelfHeal(ctx context.Context) error
+	SyncCompany(ctx context.Context, company string) error
+	BackfillThreads(ctx context.Context, applicationID int64) error
+}

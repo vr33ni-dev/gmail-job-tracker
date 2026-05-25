@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
 )
 
@@ -18,10 +17,10 @@ const (
 type Client struct {
 	httpClient *http.Client
 	provider   string
-	store      *db.Store
+	store      correctionStore
 }
 
-func NewClient(store *db.Store) *Client {
+func NewClient(store correctionStore) *Client {
 	provider := os.Getenv("LLM_PROVIDER")
 	if provider == "" {
 		provider = "ollama"

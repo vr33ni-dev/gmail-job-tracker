@@ -12,21 +12,19 @@ import (
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/auth"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/db"
 	"github.com/vr33ni-dev/gmail-job-tracker/internal/domain"
-	llmClient "github.com/vr33ni-dev/gmail-job-tracker/internal/llm"
-	syncsvc "github.com/vr33ni-dev/gmail-job-tracker/internal/sync"
 )
 
 type Handler struct {
 	store appStore
-	sync  *syncsvc.Service
-	llm   *llmClient.Client
+	sync  syncService
+	llm   ruleSuggester
 }
 
-func NewHandler(store *db.Store, llm *llmClient.Client) *Handler {
+func NewHandler(store *db.Store, llm ruleSuggester) *Handler {
 	return &Handler{store: store, llm: llm}
 }
 
-func (h *Handler) SetSync(svc *syncsvc.Service) {
+func (h *Handler) SetSync(svc syncService) {
 	h.sync = svc
 }
 
